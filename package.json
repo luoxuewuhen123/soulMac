@@ -27,14 +27,19 @@
       "legalTrademarks": "sigan"
     },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "icon.icns",
       "category": "public.app-category.lifestyle",
       "hardenedRuntime": true,
       "gatekeeperAssess": false
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "icon": "icon.png",
       "category": "Utility"
     },
@@ -72,6 +77,7 @@
     ]
   },
   "dependencies": {
+    "docx": "^9.7.1",
     "edge-tts-universal": "^1.4.0",
     "koffi": "^3.1.0",
     "oh-my-live2d": "^0.19.3",
