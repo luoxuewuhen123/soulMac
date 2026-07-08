@@ -1,0 +1,26 @@
+{
+    "Type": "Live2D Expression",
+    "Parameters": [
+        {"Id": "AJAX", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJXX", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJLH", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJHL", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJQQ", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJJZZ", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJZSS1", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJYSS1", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJZSYC", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJYSYC", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJBAX", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJBXX", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "AJYGGYC", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamAngleX", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamAngleY", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamAngleZ", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamEyeBallX", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamEyeBallY", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamBodyAngleX", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamBodyAngleY", "Value": 0, "Blend": "Overwrite"},
+        {"Id": "ParamBodyAngleZ", "Value": 0, "Blend": "Overwrite"}
+    ]
+}

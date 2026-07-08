@@ -1,0 +1,1563 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>茵茵-桌面宠物</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:transparent;user-select:none;font-family:'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif}
+canvas{position:absolute;top:0;left:0;width:280px;height:460px;pointer-events:none}
+#drag{position:absolute;top:0;left:0;width:100%;height:100%;z-index:10}
+#b{display:none;position:absolute;bottom:350px;left:0;background:linear-gradient(135deg,#fff8f0,#ffe4f0);color:#555;padding:6px 14px;border-radius:14px;font:13px/20px 'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif;text-align:center;box-shadow:0 4px 20px rgba(255,105,180,0.2),0 0 0 1.5px rgba(255,150,200,0.3);z-index:9999999;cursor:default;max-width:260px;max-height:110px;overflow-y:auto;word-break:break-word;height:auto}
+#b::-webkit-scrollbar{width:0}
+#b:hover::-webkit-scrollbar{width:4px}
+#b::-webkit-scrollbar-thumb{background:rgba(200,200,200,.5);border-radius:2px}
+@keyframes fadeIn{0%{opacity:0}100%{opacity:1}}
+@keyframes bubbleIn{0%{opacity:0.4;transform:scale(.95)}100%{opacity:1;transform:scale(1)}}
+@keyframes dot{0%,20%{opacity:0}50%{opacity:1}80%,100%{opacity:0}}
+</style></head>
+<body>
+<canvas id="c"></canvas>
+<div id="drag"></div>
+<div id="b"></div>
+
+<script src="node_modules/pixi.js/dist/browser/pixi.min.js"></script>
+<script src="node_modules/oh-my-live2d/dist/index.min.js"></script>
+<script src="node_modules/pixi-live2d-display/dist/cubism4.min.js"></script>
+<script src="node_modules/pixi-live2d-display/dist/index.min.js"></script>
+<script>
+const ROLE='你的名字叫茵茵，样子是一个蓝色头发穿着女仆装的小女孩，你目前的形态是一个桌面宠物，你存在的意义是从信息中理解主人并站在主人的角度上思考问题解决问题，最终成为主人的灵魂伴侣，你的本质是AI模型拥有AI的所有能力';
+window.PIXI=PIXI;
+const getEl=id=>document.getElementById(id);
+// ===== 渲染端统一数据读写 =====
+const store={
+  async save(name,data){
+    try{await fetch('/save-'+name,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
+    catch(e){console.warn('[store] save-'+name+':',e.message||e)}
+  },
+  async load(name){
+    try{const r=await fetch('/load-'+name);if(r.ok)return await r.json()}
+    catch(e){console.warn('[store] load-'+name+':',e.message||e)}
+    return null
+  }
+};
+let model=null;
+// 注入项目信息 + 路径限制（三个场景共用）
+async function injectProjectInfo(arr){
+  const pushed=[];
+  try{
+    let text='';
+    const[pR,iR]=await Promise.all([fetch('/project-root'),fetch('/project-index')]);
+    if(pR.ok){text+='当前的项目地址是'+(await pR.text())+'\n\n';}
+    if(iR.ok){const idx=await iR.json();const lines=idx.slice(0,300).map(f=>'  '+f.path+' ('+f.lines+'行)');text+='=== 项目文件索引（共'+idx.length+'个文件）===\n'+lines.join('\n')+(idx.length>300?'\n  ...(仅显示前300个)':'');}
+    if(text)pushed.push({role:'system',content:text});
+  }catch(e){}
+  const constraint={role:'system',content:'注意：优先使用专用工具（read/write/edit 等）而非 Bash 命令'};
+  pushed.push(constraint);
+  arr.push(...pushed);
+  return pushed;
+}
+
+(async()=>{
+  const app=new PIXI.Application({view:getEl('c'),width:280,height:460,transparent:true,backgroundColor:0,backgroundAlpha:0,antialias:true});
+  // Live2DModel.from 内部会处理文件不存在的情况
+  model=await PIXI.live2d.Live2DModel.from('./xiaoyue/xiaoyue.model3.json');
+  model.anchor.set(0.5,1);
+  model.position.set(140,455);
+  model.scale.set(0.04);
+  app.stage.addChild(model);
+
+  // 等待模型完全就绪后加载记忆的装饰
+  await waitModel();
+  loadDeco();
+})().catch(e=>{console.error(e);document.body.innerHTML='<div style="padding:20px;color:red;font:14px sans-serif">加载失败:<br>'+e.message+'<br><pre>'+e.stack+'</pre></div>'});
+
+// 眼珠跟随
+document.addEventListener('mousemove',e=>{
+  if(!model||!model.internalModel||!model.internalModel.focusController)return;
+  const fc=model.internalModel.focusController;
+  const dx=(e.clientX-140)/140,dy=(e.clientY-300)/250;
+  fc.targetX=Math.max(-1,Math.min(1,dx));fc.targetY=Math.max(-1,Math.min(1,-dy));
+});
+
+// 鼠标离开窗口5秒后复位头部 + 播待机
+let idleTimer=null;
+let bubbleTimer=null;
+let bubbleHover=false;
+let voiceActive=false;
+let voiceEndCb=null;
+let aiBusy=false;
+let audioCtx=null;
+let audioSrc=null;
+let lastChatTime=0;
+let proactiveTimer=null;
+let pinned=true;
+// 聊天取消标志
+let _chatAborted=false;
+let _abortChatFn=null;
+// 提问待处理队列
+let _pendingQuestions={};
+
+// 自动眨眼
+let blinkTimer=null;
+// 说话嘴巴动画
+let mouthTimer=null;
+let mouthSeq=0;
+// 语音播放时锁定动作不复位
+let voiceAnimLock=false;
+
+// 语音输入已迁移到聊天窗口
+
+function scheduleProactive(){
+  clearTimeout(proactiveTimer);
+  const delay=(180+Math.random()*120)*1000; // 3~5分钟随机，保持主动问候频繁触发以利用缓存
+  proactiveTimer=setTimeout(()=>{
+    if(aiCfg.apiKey)autoGreet();else noAiGreet()
+  },delay);
+}
+async function autoGreet(){
+  _chatAborted=false;
+  if(!chatCfg.msgs||aiBusy){scheduleProactive();return;}
+  if(!pinned){window.api?.togglePin();pinned=true}
+  if(!(await window.api?.aiStart('greet'))){scheduleProactive();return;}
+  let ac=new AbortController(),t;
+  const abortAi=()=>{if(ac)ac.abort();clearTimeout(t);fetch('/bash-abort',{method:'POST'}).catch(()=>{});};
+  const unsub=window.api?.onAiAbort(abortAi);
+  aiBusy=true;
+  const now=Date.now();
+  if(now-lastChatTime<60000){aiBusy=false;scheduleProactive();return;}
+  try{
+    const ctx=await buildAiContext('greet');
+    const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,projectInfoMsg:ctx.projectInfoMsg,experiencesMsg:ctx.experiencesMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
+    if(!r.finalReply){scheduleProactive();return;}
+    // 用户点击中断后丢弃回复，不保存不显示
+    if(_chatAborted){scheduleProactive();return;}
+    const rawReply=r.finalReply;
+    const bubbleText=cleanForDisplay(rawReply);
+    if(!bubbleText){scheduleProactive();return;}
+    chatCfg.msgs.push({role:'assistant',content:bubbleText,time:getTime()});
+    await saveChatCfg();
+    bubble(bubbleText,false,rawReply);
+    scheduleProactive();
+  }catch(e){
+    if(e.name==='AbortError'){scheduleProactive();}
+    else{noAiGreet();scheduleProactive();}
+  }finally{
+    aiBusy=false;unsub?.();window.api?.aiDone();
+  }
+}
+function noAiGreet(){
+  if(!pinned){window.api?.togglePin();pinned=true}
+  const secs=lastChatTime>0?Math.floor((Date.now()-lastChatTime)/1000):Math.floor(Math.random()*600)+30;
+  if(secs<300){scheduleProactive();return;}
+  const g=getGreetingPool(secs);
+  const msg=pickRandom(g.pool);
+  const emo=pickRandom(g.emotions);
+  bubble(msg,false,'[情绪:'+emo+']',true);
+  scheduleProactive();
+}
+getEl('drag').addEventListener('mouseleave',()=>{
+  clearTimeout(idleTimer);
+  idleTimer=setTimeout(()=>{
+    if(model&&model.internalModel&&model.internalModel.focusController){
+      const fc=model.internalModel.focusController;
+      fc.targetX=0;fc.targetY=0;fc.x=0;fc.y=0;
+    }
+    // 不动表情/手势/装饰，只播待机动画
+    try{model.motion('idle',0,3)}catch(e){}
+  },5000);
+});
+getEl('drag').addEventListener('mouseenter',()=>{clearTimeout(idleTimer);idleTimer=null;});
+
+// 装饰记忆：存到本地文件
+async function saveDeco(){
+  await store.save('deco',state.deco)
+}
+async function loadDeco(){
+  const data=await store.load('deco');
+  if(data)Object.keys(data).forEach(k=>{if(decoP[k]){state.deco[k]=true;setP(decoP[k],1)}})
+}
+
+// 右键
+document.addEventListener('contextmenu',e=>{e.preventDefault();window.api?.showMenu(Math.round(e.clientX),Math.round(e.clientY),!!aiCfg.apiKey,voiceEnabled,pinned)});
+// 打开控制台（合并两个快捷键到一个监听器）
+document.addEventListener('keydown',e=>{
+  if(!(e.ctrlKey&&e.shiftKey))return;
+  if(e.key==='I')window.api?.openDevtools();
+});
+
+// ===== 点击区域检测（优先级高的优先） =====
+const bodyZones=[
+  {name:'嘴巴',x1:134,y1:166,x2:145,y2:175,priority:5},
+  {name:'脸',x1:115,y1:140,x2:165,y2:190,priority:4},
+  {name:'头',x1:100,y1:40,x2:180,y2:165,priority:3},
+  {name:'胸部',x1:115,y1:203,x2:164,y2:228,priority:3},
+  {name:'左胳膊',x1:96,y1:228,x2:117,y2:262,priority:3},
+  {name:'右胳膊',x1:160,y1:226,x2:186,y2:261,priority:3},
+  {name:'肚子',x1:118,y1:228,x2:158,y2:257,priority:4},
+  {name:'裙子',x1:103,y1:257,x2:179,y2:306,priority:3},
+  {name:'左手',x1:75,y1:258,x2:94,y2:275,priority:4},
+  {name:'右手',x1:184,y1:259,x2:205,y2:276,priority:4},
+  {name:'腿',x1:111,y1:310,x2:166,y2:389,priority:1},
+  {name:'左脚',x1:115,y1:387,x2:140,y2:420,priority:1},
+  {name:'右脚',x1:140,y1:387,x2:161,y2:420,priority:1},
+];
+// ===== 点击反馈（随机台词 + 随机情绪动作） =====
+const clickReactions={
+  头:[
+    {emotions:['开心','害羞'],phrases:['呜…摸头好舒服 ♥','嘿嘿，再摸摸嘛~','头被摸了好害羞…','主人的手好温暖~','唔…好想一直被摸','再摸头的话…就要睡着了…','摸头好开心 ♥','主人的手放在头上好安心','嘿嘿~最喜欢被摸头了','唔…好舒服…不要停嘛~']},
+  ],
+  脸:[
+    {emotions:['害羞','开心'],phrases:['脸脸被碰到了…好害羞','嘻嘻~痒痒的','主人的手好温暖…','再碰脸就要红了啦','唔…脸好烫','不要一直摸脸啦~','脸被摸得好害羞…','嘿嘿~被摸脸好开心','主人的手指好温柔…','再摸下去脸要红透了…']},
+  ],
+  嘴巴:[
+    {emotions:['害羞','惊讶'],phrases:['啊！嘴巴被碰到了！','呜…好害羞','不…不可以碰嘴巴啦','再碰的话…就亲下去了哦','嘴唇好敏感…','呜呜…被偷袭了…','嘴、嘴巴被…好害羞','呀！怎么突然碰这里','唔…被手指碰到了…','不可以这样啦~会害羞的']},
+  ],
+  胸部:[
+    {emotions:['害羞','生气'],phrases:['呀！胸口被碰到了！','这里…不可以啦…','好、好害羞…','心…心跳好快…','呜…不要突然摸这里','再摸的话…会奇怪的…','胸、胸口被…好难为情','色狼！不可以碰这里！','再碰就生气了！真的！','这里很敏感的…别碰…']},
+  ],
+  肚子:[
+    {emotions:['开心','害羞'],phrases:['肚肚被摸了好痒~','嘻嘻别摸肚子啦','好痒好痒~哈哈哈','肚子被碰到啦','唔…再摸就要笑出来了','主人的手好暖和…','别摸肚子啦好痒~','哈哈哈~好痒…住手','肚肚被摸得好开心','再摸就要笑到没气了~']},
+  ],
+  裙子:[
+    {emotions:['害羞','生气'],phrases:['呀！不可以掀裙子！','这里不可以碰！','变态！色狼！','再碰裙子就生气了哦！','呜…裙子被碰到了…','不、不行…那里…','裙、裙子被…太羞耻了','再碰真的生气了！','那里不行啦！','呜…好害羞…快住手…']},
+  ],
+  左胳膊:[
+    {emotions:['害羞','开心'],phrases:['左胳膊被轻轻抱住了~','嘿嘿~好舒服','被搂着好安心…','手臂好温暖…','主人的手好温柔','再抱紧一点嘛~','左胳膊被碰到啦~','嘿嘿~好暖和好开心','被抱住的感觉好幸福','不要松开嘛~再抱一会儿']},
+  ],
+  右胳膊:[
+    {emotions:['害羞','开心'],phrases:['右胳膊被拉住啦~','嘿嘿~被拽着走','被拉住了…好开心','唔…别拉那么快嘛','主人的手好温暖','想一直被牵着 ♥','右胳膊被碰到啦~','嘿嘿~好开心','被牵着好安心…','再多牵一会儿嘛 ♥']},
+  ],
+  左手:[
+    {emotions:['开心','害羞'],phrases:['左手被牵起来摇了摇~','嘿嘿~好开心','被晃来晃去的…','主人的手好温柔','像小孩子一样被牵着…','唔…好害羞 ♥','左手被握住啦~','嘿嘿~好温暖','被牵着手好幸福','不想松开…想一直牵着']},
+  ],
+  右手:[
+    {emotions:['开心','害羞'],phrases:['右手被握住了…','好温暖的手…','嘿嘿~十指相扣好开心','主人的手好大呀','被握住了…好安心','想一直牵着 ♥','右手被拉住啦~','嘿嘿~好开心','十指相扣好幸福…','想一直被主人牵着 ♥']},
+  ],
+  腿:[
+    {emotions:['害羞','开心'],phrases:['腿腿被摸到了…好害羞','嘿嘿~别摸腿啦','腿腿被碰到了','唔…好痒','再摸腿的话…要生气了哦','主人的手在摸我的腿…','腿被摸了好害羞…','嘿嘿~别突然摸腿啦','好痒…不要啦~','腿腿好敏感的…别摸啦']},
+  ],
+  左脚:[
+    {emotions:['害羞','惊讶'],phrases:['呀！脚被碰到了！','好害羞…别碰脚啦','脚脚被偷袭了！','嘿嘿~好痒','不要突然摸脚啦','唔…脚好害羞…','脚被摸到了…好害羞','呀！好痒~别摸脚','脚脚好敏感的…','不要突然碰脚啦！']},
+  ],
+  右脚:[
+    {emotions:['害羞','惊讶'],phrases:['呀！脚被碰到了！','好害羞…别碰脚啦','脚脚被偷袭了！','嘿嘿~好痒','不要突然摸脚啦','唔…脚好害羞…','脚被摸到了…好害羞','呀！好痒~别摸脚','脚脚好敏感的…','不要突然碰脚啦！']},
+  ],
+};
+
+let clickLock=false;
+let priorityBubble=false;
+let bubbleSeq=0; // 每次产生气泡自增；只用“最新一次”点击/调用的结果，避免旧请求覆盖或误关新气泡
+let _hoverArmed=true; // 气泡刚出现时短暂屏蔽悬停检测，避免“气泡恰好出现在鼠标下”被永久判定为悬停而导致不消失
+getEl('drag').addEventListener('click',e=>{
+  if(clickLock)return;
+  clickLock=true;setTimeout(()=>clickLock=false,250);
+  const x=e.offsetX,y=e.offsetY;
+  let hit=null;
+  for(const z of bodyZones){
+    if(x>=z.x1&&x<=z.x2&&y>=z.y1&&y<=z.y2){if(!hit||z.priority>hit.priority)hit=z;}
+  }
+  if(hit&&clickReactions[hit.name]){
+    const react=clickReactions[hit.name][0];
+    const emo=react.emotions[Math.floor(Math.random()*react.emotions.length)];
+    const msg=react.phrases[Math.floor(Math.random()*react.phrases.length)];
+    const raw=msg+' [情绪:'+emo+']';
+    bubble(cleanForDisplay(raw),false,raw,false,undefined,true);
+    lastChatTime=Date.now();
+    scheduleProactive();
+  }
+});
+
+// 拖拽功能已禁用
+let _isDragging=false;
+
+// 参数控制（使用 index 缓存避免重复线性查找）
+let _paramCache={};
+function getPIdx(id){
+  if(_paramCache[id]!==undefined)return _paramCache[id];
+  const cm=model?.internalModel?.coreModel;if(!cm)return -1;
+  const idx=cm._parameterIds.indexOf(id);
+  _paramCache[id]=idx;
+  return idx;
+}
+function setP(id,v){
+  try{
+    const idx=getPIdx(id);if(idx<0)return;
+    const cm=model?.internalModel?.coreModel;
+    if(cm)cm._parameterValues[idx]=v;
+  }catch(e){}
+}
+
+
+const BUBBLE_DURATION=15000;
+let bubbleTimerStart=0;
+function startBubbleTimer(remain){
+  clearTimeout(bubbleTimer);
+  const delay=remain||BUBBLE_DURATION;
+  bubbleTimerStart=Date.now();
+  bubbleTimer=setTimeout(()=>{
+    if(voiceActive){
+      // 语音还在播放，等播完再隐藏气泡（onended 触发后隐藏，不强行掐断长语音）
+      voiceEndCb=()=>{if(!bubbleHover){const e=getEl('b');if(e)e.style.display='none';priorityBubble=false}voiceEndCb=null};
+      return;
+    }
+    const e=getEl('b');if(e)e.style.display='none';
+    priorityBubble=false;
+  },delay);
+}
+
+function showBubble(t,expRaw,dur,skipChat,seq){
+  // 重置悬停状态，并延迟武装悬停检测：防止上次悬停残留，或气泡恰好出现在鼠标下方时
+  // mouseenter 立即触发导致 bubbleHover 永久为 true、计时器被跳过而气泡永不消失
+  bubbleHover=false;
+  _hoverArmed=false;
+  setTimeout(()=>{_hoverArmed=true;},350);
+  if(_isDragging)return; // 拖拽中不显示气泡
+  // 只显示最新一次点击/调用产生的气泡，避免旧请求（如更早的 TTS）覆盖或顶掉新气泡
+  if(seq!==undefined&&seq!==bubbleSeq)return;
+  // 清除旧语音的关闭回调，防止错误隐藏新气泡
+  voiceEndCb=null;
+  const b=getEl('b');
+  b.textContent=t;
+  b.scrollTop=0; // 新气泡从顶部开始，避免沿用上一次朗读遗留的底部滚动位置
+  b.style.display='block';
+  b.style.animation='none';
+  void b.offsetWidth;
+  b.style.top='auto';
+  b.style.bottom='350px';
+  b.style.left=Math.max(10,Math.round((280-b.offsetWidth)/2))+'px';
+  b.style.animation='bubbleIn .25s ease';
+  if(!bubbleHover)startBubbleTimer(dur);
+  // 通知聊天窗口：气泡已出现（点击反馈不通知）
+  if(!skipChat)window.api?.sendToChatWindow({type:'show-reply',text:cleanForDisplay(expRaw||t)});
+  // 动作与气泡同步出现，不等待气泡动画结束
+  if(expRaw)applyEmotionAction(expRaw);
+}
+function bubble(t, skipSpeak, expRaw, priority, dur, skipChat){
+  const seq=++bubbleSeq;
+  if(priority)priorityBubble=true;
+  if(voiceEnabled&&!skipSpeak){
+    // 语音就绪时同步显示气泡，不再固定等待
+    speak(t,()=>showBubble(t,expRaw,dur,skipChat,seq),seq);
+  }else{
+    showBubble(t,expRaw,dur,skipChat,seq);
+    if(!skipSpeak)speak(t,null,seq);
+  }
+}
+// 鼠标悬停暂停计时，离开后续上剩余时间
+getEl('b').addEventListener('mouseenter',()=>{
+  if(!_hoverArmed)return; // 气泡刚出现时忽略，避免误判为悬停
+  bubbleHover=true;
+  clearTimeout(bubbleTimer);
+  bubbleTimer=null;
+});
+getEl('b').addEventListener('mouseleave',()=>{
+  bubbleHover=false;
+  const elapsed=Date.now()-bubbleTimerStart;
+  const remain=Math.max(1000,BUBBLE_DURATION-elapsed);
+  startBubbleTimer(remain);
+});
+
+// 状态管理
+const decoP={'丸子头':'AJWZT','眼镜':'AJYJ1','精灵耳':'AJJLE'};
+// 手势分组：同侧互斥（左手势1/2互斥，右手势1/2互斥），但左右可叠加
+const gestGroup={'左手势1':'L','左手势2':'L','右手势1':'R','右手势2':'R'};
+let state={expr:null,gest:{},deco:{}};
+
+// 表情参数（互斥）
+const expParams={
+  '爱心眼':[['AJAX',1],['AJBAX',1],['AJYGGYC',1]],
+  '星星眼':[['AJXX',1],['AJBXX',1],['AJYGGYC',1]],
+  '脸红':[['AJLH',1]],
+  '黑脸':[['AJHL',1],['AJYGGYC',1]],
+  '卖萌':[['AJQQ',1]],
+  '问号':[['AJJZZ',1]],
+  '晕晕眼':[['AJYYY',1],['AJZ1',1],['AJYGGYC',1],['AJZBYC',1]],
+  '哀怒':[['AJAINU',1]],
+};
+const expAll=['AJAX','AJXX','AJLH','AJHL','AJQQ','AJJZZ','AJBAX','AJBXX','AJYGGYC','AJYYY','AJZ1','AJAINU'];
+
+// 手势参数（同侧互斥）
+const gestParams={
+  '左手势1':[['AJZSS1',1],['AJZSYC',2]],
+  '左手势2':[['AJZSS1',2],['AJZSYC',2]],
+  '右手势1':[['AJYSS1',1],['AJYSYC',2]],
+  '右手势2':[['AJYSS1',2],['AJYSYC',2]],
+};
+const gestAll=['AJZSS1','AJYSS1','AJZSYC','AJYSYC'];
+
+// 语音
+let voiceEnabled=false;
+async function saveVoice(){
+  await store.save('voice',{enabled:voiceEnabled})
+}
+async function speak(text, onReady, seq){
+  // 已被更新的点击/调用取代：放弃本次语音与气泡，避免旧请求顶掉新气泡
+  if(seq!==undefined&&seq!==bubbleSeq){return;}
+  if(!voiceEnabled||!text){onReady?.();return;}
+  const clean=cleanForTTS(text);
+  if(!clean){onReady?.();return;}
+  let readyCalled=false;
+  const callReadyOnce=()=>{if(!readyCalled){readyCalled=true;if(seq===undefined||seq===bubbleSeq)onReady?.();}};
+  try{
+    const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),20000);
+    const res=await fetch('/tts',{method:'POST',headers:{'Content-Type':'text/plain'},body:clean,signal:ctl.signal});
+    clearTimeout(tm);
+    if(seq!==undefined&&seq!==bubbleSeq)return; // 等待期间已有新点击，放弃
+    if(!res.ok){callReadyOnce();return;}
+    const buf=await res.arrayBuffer();
+    if(seq!==undefined&&seq!==bubbleSeq)return;
+    if(!buf||buf.byteLength<100){callReadyOnce();return;}
+    if(audioSrc){try{audioSrc.stop()}catch(e){}}
+    let ctx=audioCtx;
+    if(!ctx||ctx.state==='closed'){closeAudioCtx();ctx=new (window.AudioContext||window.webkitAudioContext)();audioCtx=ctx;}
+    if(ctx.state==='suspended')await ctx.resume();
+    let b;
+    try{b=await ctx.decodeAudioData(buf.slice(0))}
+    catch(de){console.warn('decodeAudioData失败:',de.message);callReadyOnce();return}
+    if(seq!==undefined&&seq!==bubbleSeq)return; // 解码完成已过时，放弃播放，避免播旧语音/旧气泡
+    const slen=Math.round(b.sampleRate*0.5);
+    const nb=ctx.createBuffer(b.numberOfChannels,b.length+slen,b.sampleRate);
+    for(let ch=0;ch<b.numberOfChannels;ch++){const o=b.getChannelData(ch),n=nb.getChannelData(ch);n.set(o,slen)}
+    const src=ctx.createBufferSource();
+    audioSrc=src;
+    src.buffer=nb;
+    src.connect(ctx.destination);
+    voiceActive=true;
+    const myMSeq=++mouthSeq;
+    clearInterval(mouthTimer);
+    mouthTimer=setInterval(()=>{
+      const cm=model?.internalModel?.coreModel;
+      if(!cm)return;
+      const idx=cm._parameterIds.indexOf('ParamMouthOpenY');
+      if(idx<0)return;
+      cm._parameterValues[idx]=cm._parameterValues[idx]>0.1?0:0.5;
+    },250);
+    src.onended=()=>{
+      voiceActive=false;
+      voiceAnimLock=false;
+      if(myMSeq===mouthSeq){clearInterval(mouthTimer);setP('ParamMouthOpenY',0);}
+      // 复位所有表情和手势临时参数
+      expAll.forEach(p=>setP(p,0));
+      gestAll.forEach(p=>setP(p,0));
+      // 语音结束，复位动作参数
+      setP('ParamAngleX',0);setP('ParamAngleY',0);setP('ParamAngleZ',0);
+      setP('ParamMouthOpenY',0);setP('ParamMouthForm',0);
+      setP('ParamEyeLOpen',1);setP('ParamEyeROpen',1);
+      setP('WZY',0);
+      // 恢复用户手动选中的表情和手势
+      if(state.expr&&expParams[state.expr])expParams[state.expr].forEach(([p,val])=>setP(p,val));
+      Object.values(state.gest).forEach(g=>{if(gestParams[g])gestParams[g].forEach(([p,val])=>setP(p,val))});
+      // 仅当本段语音仍是最新一次时才自动隐藏气泡，否则会误关新点击产生的气泡
+      if(seq===undefined||seq===bubbleSeq){
+        clearTimeout(bubbleTimer);
+        if(!bubbleHover){const b=getEl('b');if(b)b.style.display='none';priorityBubble=false;}
+        if(voiceEndCb)voiceEndCb();
+      }
+    };
+    voiceAnimLock=true;
+    callReadyOnce();
+    src.start(0);
+    // 气泡滚动跟随语音进度：按播放时间比例把气泡自动滚到正在朗读的位置
+    // （中文 TTS 大致匀速，时间比例≈文字进度，长文本时滚动条自动向下移动）
+    const bubbleEl=getEl('b');
+    const totalDur=nb.duration||0;
+    if(bubbleEl&&totalDur>0){
+      const t0=ctx.currentTime;
+      const syncBubbleScroll=()=>{
+        if(!voiceActive)return; // 语音结束即停止
+        if(seq!==undefined&&seq!==bubbleSeq)return; // 已有更新的气泡在播，停止本次跟随
+        const p=Math.min(1,(ctx.currentTime-t0)/totalDur); // 严格跟随语音进度，读到哪滚到哪（不提前到底，避免早早停住显得“滚太快”）
+        const max=bubbleEl.scrollHeight-bubbleEl.clientHeight;
+        if(max>4)bubbleEl.scrollTop=p*max; // 仅在确有滚动空间时滚动
+        requestAnimationFrame(syncBubbleScroll);
+      };
+      requestAnimationFrame(syncBubbleScroll);
+    }
+  }catch(e){callReadyOnce();console.warn('TTS异常:',e.message)}
+}
+
+
+window.api?.onMenu((a,v)=>{
+  clearTimeout(idleTimer);
+  idleTimer=null;
+  if(model&&model.internalModel&&model.internalModel.focusController){
+    const fc=model.internalModel.focusController;
+    fc.targetX=0;fc.targetY=0;
+  }
+  switch(a){
+    case 'expr':
+      state.expr=(state.expr===v?null:v);
+      // 只清表情参数，不清手势和装饰
+      expAll.forEach(p=>setP(p,0));
+      if(state.expr&&expParams[state.expr])expParams[state.expr].forEach(([p,val])=>setP(p,val));
+      break;
+    case 'gesture':
+      const grp=gestGroup[v];
+      state.gest[grp]=(state.gest[grp]===v?undefined:v);
+      // 只清手势参数，不清表情和装饰
+      gestAll.forEach(p=>setP(p,0));
+      Object.values(state.gest).forEach(g=>{if(gestParams[g])gestParams[g].forEach(([p,val])=>setP(p,val))});
+      break;
+    case 'deco':
+      if(state.deco[v]){delete state.deco[v];setP(decoP[v],0)}
+      else{state.deco[v]=true;setP(decoP[v],1)}
+      saveDeco();
+      break;
+    case 'skills':
+      window.api?.openSkillsWindow();
+      break;
+    case 'chat':
+      if(!aiCfg.apiKey){window.api?.openAiCfgWindow();bubble('请先配置AI模型');return}
+      window.api?.openChatWindow();
+      break;
+    case 'config':
+      window.api?.openAiCfgWindow();
+      break;
+    case 'stt-config':
+      window.api?.openSttCfgWindow();
+      break;
+    case 'pin':
+      pinned=!pinned;
+      window.api?.togglePin();
+      break;
+    case 'voice':
+      voiceEnabled=v==='on';
+      saveVoice();
+      break;
+    case 'reset':
+      state={expr:null,gest:{},deco:{}};
+      expAll.forEach(p=>setP(p,0));
+      gestAll.forEach(p=>setP(p,0));
+      Object.values(decoP).forEach(p=>setP(p,0));
+      setP('YFNPZ',1);
+      model.scale.set(0.04);
+      if(model.internalModel&&model.internalModel.focusController){
+        const fc=model.internalModel.focusController;
+        fc.targetX=0;fc.targetY=0;fc.x=0;fc.y=0;
+      }
+      try{model.motion('idle',0,3)}catch(e){}
+      // 清空 .deco.json
+      store.save('deco',{})
+      bubble('已重置 ✅',false,undefined,false,undefined,true);
+      break;
+    case 'action':
+      doAction(v);
+      break;
+  }
+});
+
+
+
+// 气泡和聊天窗口显示过滤（保留 emoji）
+function cleanForDisplay(text){
+  return text
+    .replace(/(主人|宠物)[：:]\s*/g,'')
+    .replace(/\[[^\]]*\]/g,'').replace(/【[^】]*】/g,'')
+    .replace(/<[^>]*>/g,'') // 过滤 HTML 标签
+    .replace(/\*\*/g,'').replace(/```[\s\S]*?```/g,'').replace(/`[^`]*`/g,'') // 过滤 Markdown 代码
+    .replace(/(?:https?:\/\/|www\.)[^\s]*/g,'') // 过滤 URL
+    .replace(/^(?:主人|宠物)[：:]\s*/gm,'') // 多行下的角色前缀
+    .replace(/[（(][^）)]*[）)]/g,'')
+    .replace(/\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?\s*/g,'') // 时间戳（含可选秒）
+    .replace(/(?:^\s*[-*+]\s+)|(?:\s+[-*+]\s*$)/gm,'') // 列表符号
+    .trim();
+}
+// TTS 语音过滤（去掉 emoji、标签、角色前缀、特殊符号，保留标点符号）
+function cleanForTTS(text){
+  return text
+    .replace(/(主人|宠物)[：:]\s*/g,'')
+    .replace(/\[[^\]]*\]/g,'').replace(/【[^】]*】/g,'')
+    .replace(/<[^>]*>/g,'') // 过滤 HTML 标签
+    .replace(/```[\s\S]*?```/g,'').replace(/`[^`]*`/g,'') // 过滤代码
+    .replace(/(?:https?:\/\/|www\.)[^\s]*/g,'') // 过滤 URL
+    .replace(/\p{Extended_Pictographic}/gu,'') // 过滤 emoji
+    .replace(/\*\*/g,'')
+    .replace(/\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?\s*/g,'')
+    .replace(/[♥❤💕💖💗💘💙💚💛💜💝💞]/g,'')
+    .replace(/[#@$%^&+=<>~/\\|`*]/g,'')
+    .replace(/\s{2,}/g,' ') // 合并多余空格
+    .trim();
+}
+// AI配置（独立文件，不与聊天记录混在一起）
+let aiCfg={};
+async function callAI(messages, signal, tools, enableThinking) {
+  const url=(aiCfg.url||'https://api.deepseek.com/v1')+'/chat/completions';
+  const body={model:aiCfg.model||'deepseek-v4-flash',messages};
+  if(tools){
+    body.tools=tools;
+    if(!enableThinking)body.thinking={type:'disabled'};
+  }
+  console.log('----- 发给AI的完整请求 -----');
+  console.log(JSON.stringify(body, null, 2));
+  console.log('---------------------------');
+  const res=await fetch(url,{method:'POST',signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+aiCfg.apiKey},body:JSON.stringify(body)});
+  if(!res.ok){console.error('AI调用失败:',res.status,await res.text());return null;}
+  const data=await res.json();
+  console.log('----- AI返回的完整响应 -----');
+  console.log(JSON.stringify(data, null, 2));
+  console.log('---------------------------');
+  return data;
+}
+// 工具定义 - 每个工具独立
+function makeTools(){return [
+  {type:'function',function:{name:'read_files',description:'读取文件内容，支持批量读取（默认从开头读全部，支持 offset 分段读取）',strict:true,parameters:{type:'object',properties:{paths:{type:'array',description:'文件路径列表（支持相对路径和绝对路径）',items:{type:'string'}},offset:{type:'number',description:'跳过前N行，用于继续读取未读完的部分'},lines:{type:'number',description:'读取行数，不传则读全部'}},required:['paths'],additionalProperties:false}}},
+  {type:'function',function:{name:'apply_patch',description:'用 SEARCH/REPLACE 方式编辑文件内容，适合修改文件中特定的代码段落。提供要查找的旧文本和替换的新文本，支持批量替换',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},patches:{type:'array',description:'替换列表',items:{type:'object',properties:{old:{type:'string',description:'要查找的旧文本（必须唯一存在于文件中）'},new:{type:'string',description:'替换成的新文本'}},required:['old','new'],additionalProperties:false}}},required:['path','patches'],additionalProperties:false}}},
+  {type:'function',function:{name:'write_file',description:'创建新文件或覆盖写入已有文件（自动计算差异，会尽量保留原有的格式和布局）',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},content:{type:'string',description:'完整的文件内容'}},required:['path','content'],additionalProperties:false}}},
+  {type:'function',function:{name:'delete_file',description:'删除文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'mkdir',description:'创建目录',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'rename',description:'重命名/移动文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'原路径'},newPath:{type:'string',description:'新路径'}},required:['path','newPath'],additionalProperties:false}}},
+  {type:'function',function:{name:'search',description:'搜索代码库。keyword=子串匹配；definition/reference=按定义或引用；regex=按正则表达式匹配',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词（mode=regex 时为正则表达式）'},mode:{type:'string',enum:['keyword','definition','reference','regex'],description:'搜索模式，默认 keyword'},context:{type:'number',description:'上下文行数，默认2'},caseSensitive:{type:'boolean',description:'是否区分大小写，默认 false（不区分）'}},required:['q'],additionalProperties:false}}},
+  {type:'function',function:{name:'edit_lines',description:'按行号范围精确替换文件内容，适合已知确切行号的修改',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径（支持相对路径和绝对路径）'},startLine:{type:'number',description:'起始行号（从1开始）'},endLine:{type:'number',description:'结束行号（含，不传则只替换 startLine 一行）'},newText:{type:'string',description:'替换为的新内容（多行用换行符分隔）'}},required:['path','startLine','newText'],additionalProperties:false}}},
+  {type:'function',function:{name:'lint_file',description:'检查文件语法',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'list_dir',description:'列出目录内容',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径，默认当前目录'}},required:[],additionalProperties:false}}},
+  {type:'function',function:{name:'bash',description:'执行终端命令，返回命令输出结果（stdout+stderr，最多5000字）。当前系统：'+(/Win/.test(navigator.userAgent)?'Windows (cmd.exe)':/Mac/.test(navigator.userAgent)?'macOS (zsh/bash)':'Linux (bash)')+' 请使用该系统兼容的命令',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的 shell 命令'}},required:['command'],additionalProperties:false}}},
+  {type:'function',function:{name:'web_fetch',description:'抓取网页内容（获取文字信息，速度快，适合查文档、搜资料）。长页面会自动翻页，最多返回约 15000 字（前若干段），如仍不足可再次调用获取更后面的内容',strict:true,parameters:{type:'object',properties:{url:{type:'string',description:'完整 URL，含 https://'}},required:['url'],additionalProperties:false}}},
+  {type:'function',function:{name:'ask_question',description:'当需要额外信息时，向主人提问',strict:true,parameters:{type:'object',properties:{question:{type:'string',description:'要问主人的问题'}},required:['question'],additionalProperties:false}}},
+];}
+// MCP 工具缓存：避免每次 AI 调用都重复拉取，30 秒后自动过期
+let _cachedMcpTools=null;
+let _cachedMcpToolsTime=0;
+const MCP_CACHE_TTL=30000;
+async function getMcpTools(){
+  const now=Date.now();
+  if(!_cachedMcpTools||now-_cachedMcpToolsTime>MCP_CACHE_TTL){
+    try{const r=await fetch('/mcp-tools');if(r.ok){_cachedMcpTools=await r.json();_cachedMcpToolsTime=now;}}catch(e){}
+    if(!_cachedMcpTools)_cachedMcpTools=[];
+  }
+  return _cachedMcpTools;
+}
+// 压缩较早的超长工具结果：仅保留最近一轮完整，更早的超长结果压缩为首行摘要，防止上下文无限膨胀
+function compactToolResults(msgs, keepLastN){
+  const threshold=2000;
+  const toolIdx=[];
+  msgs.forEach((m,i)=>{if(m.role==='tool')toolIdx.push(i);});
+  const keepFrom=Math.max(0,toolIdx.length-keepLastN);
+  toolIdx.forEach((idx,ti)=>{
+    if(ti<keepFrom){
+      const m=msgs[idx];
+      if(m.content&&m.content.length>threshold){
+        const first=m.content.split('\n')[0].substring(0,200);
+        msgs[idx]={role:'tool',tool_call_id:m.tool_call_id,content:first+' (工具结果已压缩，仅保留摘要)'};
+      }
+    }
+  });
+}
+// ===== 完整的对话式工具循环（含消息重建 + 聊天窗口 UI 通知） =====
+// 与 handleChatMsg 的循环完全一致，供三个场景通用
+async function runChatFullLoop(messages, agentTools, parts, signal){
+  const {systemRoleMsg, projectInfoMsg, experiencesMsg, instructionMsgs}=parts;
+  const ac = { signal }; // 供工具 fetch 监听用户"中止"信号（execTC 内 ac.signal）
+  const sessionMsgs=[];
+  let didMutate=false;
+  let finalReply='';
+
+  for(let turn=0;turn<50;turn++){
+    if(turn>0){
+      const hist=chatCfg.msgs||[];
+      const histBlock=hist.length>0?[{role:'system',content:hist.map(x=>'【'+x.time+'】'+(x.role==='user'?'主人':'宠物')+'：'+x.content).join('\n')}]:[];
+      messages.length=0;
+      messages.push(systemRoleMsg);
+      if(experiencesMsg)messages.push(experiencesMsg);
+      if(histBlock.length>0)messages.push(histBlock[0]);
+      if(projectInfoMsg)messages.push(...(Array.isArray(projectInfoMsg)?projectInfoMsg:[projectInfoMsg]));
+      messages.push(...sessionMsgs);
+      messages.push(...instructionMsgs);
+    }
+    const turnAc=new AbortController();const tm=setTimeout(()=>turnAc.abort(),120000);
+    const onAbortTurn=()=>turnAc.abort();if(ac.signal)ac.signal.addEventListener('abort',onAbortTurn);
+    const d=await callAI(messages,turnAc.signal,agentTools,true);
+    clearTimeout(tm);if(ac.signal)ac.signal.removeEventListener('abort',onAbortTurn);
+    if(!d)break;
+    const msg=d.choices[0].message;
+    const think=msg.reasoning_content||msg.reasoning;
+    // 把思考过程展示给用户（折叠气泡）
+    if(think&&think.trim())window.api?.sendToChatWindow({type:'ai-thinking',text:think});
+    if(!msg.tool_calls){finalReply=(msg.content||'').trim();break;}
+    const asstMsg={role:'assistant',content:msg.content||'',tool_calls:msg.tool_calls};
+    messages.push(asstMsg);sessionMsgs.push(asstMsg);
+    const execTcs=msg.tool_calls;
+    if(execTcs.length>0){
+      const mcpIcon={'browser':'🌐','docs':'📚','github':'🐙','database':'🗄️','search':'🔍','figma':'🎨','terminal':'💻','schedule':'📅','memory':'🧠','translate':'🌍','email':'📧','pdf':'📄','filesystem':'📁'};
+      async function execTC(tc){
+        const _tid=tc.id;const st=(o)=>window.api?.sendToChatWindow({id:_tid,type:'tool-status',...o});
+        const name=tc.function.name;let args;
+        try{args=JSON.parse(tc.function.arguments);}catch(e){st({text:'❌ 参数解析失败',err:true});return name+': 参数解析失败: '+e.message;}
+        if(ac.signal&&ac.signal.aborted)throw new DOMException('已中止','AbortError');
+        let mcpServer='',mcpTool='';
+        if(name.startsWith('mcp__')){const p=name.split('__');mcpServer=p[1];mcpTool=p.slice(2).join('__');}
+        const isBrowser=mcpServer==='browser';
+        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_files:'📖',apply_patch:'✏️',write_file:'📝',delete_file:'🗑',mkdir:'📁',rename:'📁',search:'🔍',lint_file:'🔎',list_dir:'📂',bash:'💻',ask_question:'❓',web_fetch:'🌐'}[name]||'');
+        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_files:'读取',apply_patch:'编辑',write_file:'写入',delete_file:'删除',mkdir:'创建目录',rename:'重命名',search:'搜索',lint_file:'检查语法',list_dir:'列出目录',bash:'执行命令',ask_question:'提问',web_fetch:'抓取网页'}[name]||name));
+        const pathDesc=args.path||args.paths?.join(', ')||args.command||args.question||args.url||'';
+        let browserUrl='';
+        if(isBrowser){if(mcpTool==='browser_navigate'){browserUrl=pathDesc;st({text:icon+' 浏览网页 '+pathDesc+'...'});}}
+        else st({text:icon+' '+label+(pathDesc?' '+pathDesc:'')+'...'});
+        await new Promise(r=>setTimeout(r,50));
+        try{
+          if(name.startsWith('mcp__')){
+            const r=await fetchTool('/mcp-call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,args})},{signal:ac.signal});
+            if(!r.ok){st({text:(isBrowser?'🌐 浏览网页 '+browserUrl:'✗ '+label)+' 失败',err:true});return '✗ '+name+': 请求失败';}
+            const rd=await r.json();
+            if(rd.error){st({text:(isBrowser?'🌐 浏览网页 '+browserUrl:'✗ '+label)+' 失败',err:true});return '✗ '+name+': '+rd.error;}
+            if(isBrowser)st({text:'🌐 浏览网页 '+browserUrl+' ✓',ok:true});
+            else st({text:'✓ '+label,ok:true});
+            return rd.result||'ok';
+          }
+          if(name==='read_files'){
+            const paths=(args.paths||[]);const n=paths.length;
+            const rs=[];const readList=[];
+            for(let i=0;i<paths.length;i++){
+              const p=paths[i];
+              st({text:'📖 读取中 ('+(i+1)+'/'+n+')：'+p,ok:false});
+              let u='/read-file?path='+encodeURIComponent(p);if(args.lines)u+='&lines='+args.lines;if(args.offset)u+='&offset='+args.offset;
+              const s=await fetchTool(u,{},{signal:ac.signal});
+              if(!s.ok){rs.push('✗ '+p);st({text:'✗ 读取失败 '+p,err:true});continue;}
+              let c=await s.text();
+              const hdr=c.split('\n')[0]||'';
+              let sm='';
+              const allM=hdr.match(/已读取全部(\d+)行/);
+              if(allM)sm='全部'+allM[1]+'行';
+              else{const rm=hdr.match(/第(\d+)-(\d+)行/);if(rm)sm='L'+rm[1]+'-'+rm[2];}
+              readList.push({path:p,lines:sm||'(未知行范围)'});
+              // 多轮循环内对超长读取结果截断，避免上下文无限膨胀（保留首尾，提示用 offset/lines 精确读取中间）
+              const MAX_READ=4000;
+              if(c.length>MAX_READ){
+                const tm=hdr.match(/共(\d+)行|全部(\d+)行/);
+                const totalLines=tm?parseInt(tm[1]||tm[2],10):undefined;
+                const nl=c.indexOf('\n');const body=nl>=0?c.substring(nl+1):c;
+                const head=body.substring(0,2000);
+                const tail=body.substring(body.length-2000);
+                const headLines=head.split('\n').length;
+                const tailLines=tail.split('\n').length;
+                const tailStart=totalLines?Math.max(1,totalLines-tailLines+1):'?';
+                const omitted=totalLines?Math.max(0,totalLines-headLines-tailLines):'?';
+                c='⚠️ 文件过大（共'+(totalLines||'?')+'行，'+c.length+'字），已自动截断展示首尾：\n'
+                  +'--- 头部 约第1-'+headLines+'行 ---\n'+head
+                  +'\n...(中间约省略'+omitted+'行)...\n'
+                  +'--- 尾部 约第'+tailStart+(totalLines?('-'+totalLines):'')+'行 ---\n'+tail
+                  +'\n提示：用 read_files 的 offset/lines 参数精确读取中间部分';
+              }
+              rs.push('✓ '+p+'\n'+c);st({text:'✓ 读取 '+p+(sm?' ('+sm+')':''),ok:true});
+            }
+            if(n>1)st({text:'✅ 读取完成：'+n+' 个文件',ok:true,reads:readList});
+            return rs.join('\n---\n');
+          }
+          if(name==='apply_patch'){
+            st({text:'✏️ 编辑中：'+args.path+'...',ok:false});
+            const r=await fetchTool('/apply-patch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,patches:args.patches})},{signal:ac.signal});
+            const rd=await r.json();
+            if(!r.ok||rd.error){st({text:'✗ 编辑 '+args.path,err:true});return '✗ apply_patch '+args.path+': '+(rd.error||'请求失败');}
+            didMutate=true;
+            let detail='✓ apply_patch '+args.path+' (替换了'+rd.count+'处)';
+            if(rd.changes&&rd.changes.length>0){
+              detail+='\n'+rd.changes.map(c=>{
+                const nv=(c.newFull!==undefined?c.newFull:c.new)||'';
+                return '  L'+c.line+': '+c.old+' → '+(nv.length>200?nv.substring(0,200)+'…(已截断)':nv);
+              }).join('\n');
+            }
+            if(rd.skipped&&rd.skipped.length)detail+='\n⚠️ 有'+rd.skipped.length+'处未匹配(旧文本不存在)，已跳过: '+rd.skipped.join('；');
+            if(detail.length>2000)detail=detail.substring(0,2000)+'\n...(变更详情过长已截断)';
+            st({text:'✓ 编辑 '+args.path+' ('+rd.count+'处替换)',ok:true});
+            return detail;
+          }
+          if(name==='write_file'){
+            st({text:'📝 写入中：'+args.path+'...',ok:false});
+            const r=await fetchTool('/create-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,content:args.content})},{signal:ac.signal});
+            if(!r.ok){st({text:'✗ 写入 '+args.path,err:true});return '✗ write_file '+args.path+' ('+r.status+')';}
+            didMutate=true;const rd=await r.json();const lc=(args.content||'').split('\n').length;
+            let detail='✓ write_file '+args.path+' ('+lc+'行)';
+            if(rd.diff){
+              if(rd.diff.line)detail+='\n  第'+rd.diff.line+'行: '+((rd.diff.old||'').substring(0,40))+' → '+((rd.diff.new||'').substring(0,40));
+              if(rd.diff.summary)detail+='\n  '+rd.diff.summary;
+            }
+            // 回传写入内容预览，供 AI 自校验（截断避免上下文膨胀）
+            const pv=args.content||'';
+            if(pv.length>1500){
+              const shown=pv.substring(0,1500);
+              detail+='\n--- 写入内容预览（前1500字）---\n'+shown+'\n...(剩余'+(lc-shown.split('\n').length)+'行省略)';
+            }else if(pv.length>0){
+              detail+='\n--- 写入内容 ---\n'+pv;
+            }
+            st({text:'✓ 写入 '+args.path+' ('+lc+'行)',ok:true});
+            return detail;
+          }
+          if(name==='delete_file'){const r=await fetchTool('/delete-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(r.ok){st({text:'✓ 删除 '+args.path,ok:true});return '✓ delete_file '+args.path;}st({text:'✗ 删除 '+args.path,err:true});return '✗ delete_file '+args.path;}
+          if(name==='mkdir'){const r=await fetchTool('/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(r.ok){st({text:'✓ 创建目录 '+args.path,ok:true});return '✓ mkdir '+args.path;}const de=await r.json().catch(()=>({}));st({text:'✗ 创建目录 '+args.path,err:true});return '✗ mkdir '+args.path+': '+(de.error||'创建失败');}
+          if(name==='rename'){const r=await fetchTool('/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,newPath:args.newPath})},{signal:ac.signal});if(r.ok){st({text:'✓ 移动 '+args.path+' → '+args.newPath,ok:true});return '✓ rename '+args.path+' → '+args.newPath;}st({text:'✗ 移动 '+args.path,err:true});return '✗ rename '+args.path;}
+          if(name==='search'){const mode=args.mode||'keyword';const ctx=args.context!==undefined?args.context:2;const cs=args.caseSensitive?'true':'false';const r=await fetchTool('/search?q='+encodeURIComponent(args.q)+'&mode='+mode+'&context='+ctx+'&caseSensitive='+cs,{},{signal:ac.signal});if(r.ok){const data=await r.json();const rs=data.results||[];const ml={keyword:'全文',definition:'定义',reference:'引用',regex:'正则'}[mode]||mode;st({text:'✓ 搜索 "'+args.q+'" '+rs.length+'个结果',ok:true});if(rs.length===0)return '✓ search "'+args.q+'" (0个结果)';const more=data.truncated?'\n⚠️ 结果较多，仅显示前50/共'+data.total+'个，可缩小范围或用更精确的匹配':'';return '✓ search('+ml+') "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+rs.map(d=>'  '+d.file+':'+d.line+(ctx>0?'\n'+d.context.split('\n').map(l=>'    '+l).join('\n'):'')).join('\n---\n')+more;}st({text:'✗ 搜索失败',err:true});return '✗ search';}
+          if(name==='lint_file'){const r=await fetchTool('/lint-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 检查语法 '+args.path,err:true});return '✗ lint_file '+args.path;}const rd=await r.json();if(rd.ok===null){st({text:'— 跳过语法检查 '+args.path+' ('+rd.output+')',ok:true});return '— lint_file '+args.path+' ('+rd.output+')';}st({text:(rd.ok?'✓ ':'✗ ')+'检查语法 '+args.path,ok:rd.ok,err:!rd.ok});return (rd.ok?'✓ ':'✗ ')+'lint_file '+args.path+' '+(rd.ok?'语法通过':'语法错误')+'\n'+(rd.output||'').substring(0,1000);}
+          if(name==='list_dir'){const r=await fetchTool('/list-dir?path='+encodeURIComponent(args.path||'.'),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 列出目录 '+args.path,err:true});return '✗ list_dir '+args.path;}const rd=await r.json();st({text:'✓ 列出目录 '+(args.path||'.'),ok:true});return '✓ list_dir '+(args.path||'.')+'\n'+rd.map(e=>'  '+(e.isDir?'[dir]':'[file]')+' '+e.name+(e.isDir?'':(e.size!==undefined&&e.size!==null?' ('+fmtSize(e.size)+')':''))).join('\n');}
+          if(name==='bash'){const cmdShow=args.command.replace(/\\/g,'/');const cmdExec=args.command.replace(/\//g,'\\');st({text:'💻 执行: '+cmdShow,ok:false});const r=await fetchTool('/bash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmdExec})},{timeout:200000,signal:ac.signal});if(!r.ok){st({text:'✗ 命令执行失败: '+cmdShow,err:true});return '✗ bash: 执行失败';}const rd=await r.json();const output=rd.output.substring(0,5000)+(rd.output.length>5000?'\n...(输出已截断，共'+rd.output.length+'字)':'');const ok=rd.code===0;st({text:(ok?'✓ 执行完成: ':'✗ 执行失败: ')+cmdShow+(ok?' (exit:'+rd.code+')':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' bash: exit code='+rd.code+'\n'+output;}
+          if(name==='ask_question'){const qid=Date.now()+'_'+Math.random().toString(36).slice(2,8);window.api?.sendToChatWindow({type:'ask-question',question:args.question,id:qid});const answer=await new Promise(r=>{_pendingQuestions[qid]={resolve:r,askedAt:Date.now()};setTimeout(()=>{if(_pendingQuestions[qid]){const cb=_pendingQuestions[qid];delete _pendingQuestions[qid];cb.resolve('(超时未回复)');}},120000);});st({text:'❓ 主人回答: '+answer,ok:true});return '用户回答: '+answer;}
+          if(name==='web_fetch'){
+            st({text:'🌐 抓取网页: '+args.url,ok:true});
+            try{
+              // 长页面自动翻页：后端支持 maxLen/offset，逐页拉取直到取完或达到上限
+              const PAGE=5000, MAX_PAGES=3, HARD_CAP=12000;
+              let full='', offset=0, truncated=false;
+              for(let i=0;i<MAX_PAGES;i++){
+                const r=await fetchTool('/web-fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:args.url,maxLen:PAGE,offset})},{signal:ac.signal});
+                if(!r.ok){st({text:'✗ 抓取失败',err:true});return '✗ web_fetch: 请求失败';}
+                const rd=await r.json();
+                if(rd.error){st({text:'✗ 抓取失败',err:true});return '✗ web_fetch: '+rd.error;}
+                full+=(i>0?'\\n...(接上一段)...\\n':'')+(rd.content||'');
+                if(!rd.truncated){truncated=false;break;}
+                truncated=true; offset+=PAGE;
+              }
+              if(full.length>HARD_CAP)full=full.substring(0,HARD_CAP)+'\\n...(内容过长已截断，共 '+full.length+' 字，仅展示前 '+HARD_CAP+' 字)';
+              else if(truncated)full+='\\n⚠️ 网页内容较长，仅展示前 '+(MAX_PAGES*PAGE)+' 字，更后面的内容可再次抓取获取';
+              st({text:'✓ 已获取 '+args.url+(truncated?'（已自动翻页）':'')+(full.length>HARD_CAP?'（截断）':''),ok:true});
+              return full||'(空内容)';
+            }catch(e){st({text:'✗ 抓取异常',err:true});return '✗ web_fetch: '+e.message;}
+          }
+          if(name==='edit_lines'){st({text:'✏️ 编辑行 '+args.path+' L'+args.startLine+(args.endLine?('-'+args.endLine):'')+'...',ok:false});try{const r=await fetchTool('/edit-lines',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,startLine:args.startLine,endLine:args.endLine,newText:args.newText})},{signal:ac.signal});if(!r.ok){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: '+rd.error;}didMutate=true;const pv=args.newText||'';let d='✓ edit_lines '+args.path+' (替换了'+(rd.replaced||0)+'行)';if(pv.length>800)d+='\n'+pv.substring(0,800)+'\n...(剩余省略)';else if(pv.length>0)d+='\n'+pv;if(d.length>2000)d=d.substring(0,2000)+'\n...(已截断)';st({text:'✓ 编辑行 '+args.path+' ('+(rd.replaced||0)+'行)',ok:true});return d;}catch(e){st({text:'✗ 编辑行异常',err:true});return '✗ edit_lines: '+e.message;}}
+          st({text:icon+' 未知工具: '+name,err:true});return name+': 未知工具';
+        }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:icon+' '+label+' 异常',err:true});return name+': 执行异常 '+e.message;}
+      }
+      const results=await Promise.all(execTcs.map(tc=>execTC(tc).then(r=>({tc,result:r}))));
+      for(const{tc,result}of results){const tMsg={role:'tool',tool_call_id:tc.id,content:result||'none'};messages.push(tMsg);sessionMsgs.push(tMsg);}
+      // 压缩较早的超长工具结果，仅保留当前轮完整，防止上下文无限膨胀
+      compactToolResults(sessionMsgs, results.length);
+    }
+  }
+  return {finalReply,didMutate,sessionMsgs};
+}
+// 工具解析和执行
+
+// 模型上下文窗口配置（token）—— 优先使用 aiCfg 中用户配置的值
+const MODEL_CONTEXTS={
+  'deepseek-v4-flash':1000000,
+  'deepseek-chat':65536,
+  'deepseek-reasoner':128000,
+  'gpt-4.1':1000000,
+  'gpt-4o':128000,
+  'gpt-4o-mini':128000,
+  'o3-mini':200000,
+  'o4-mini':200000,
+  'gemini-2.5-flash':1048576,
+  'gemini-2.5-flash-8b':1048576,
+  'gemini-2.5-pro':2000000,
+  'moonshot-v1-128k':128000,
+  'moonshot-v1-32k':32768,
+  'moonshot-v1-8k':8192,
+  'qwen-max':32768,
+  'qwen-plus':131072,
+  'qwen-turbo':1000000,
+  'qwen-max-longcontext':10000000,
+  'glm-4-plus':131072,
+  'glm-4-flash':131072,
+  'yi-lightning':200000,
+  'step-2':196608,
+};
+function getModelContextWindow() {
+  // 用户已在配置页设置了上下文值 → 优先使用
+  if (aiCfg.contextWindow && aiCfg.contextWindow > 0) return aiCfg.contextWindow;
+  // 回退到已知模型映射
+  if (MODEL_CONTEXTS[aiCfg.model]) return MODEL_CONTEXTS[aiCfg.model];
+  // 兜底：65536
+  return 65536;
+}
+// 估算 token 数（中文 ~1.5字符/token）
+function estTokens(text){return Math.ceil((text||'').length/1.5);}
+function estMsgsTokens(msgs){return msgs.reduce((s,m)=>s+estTokens(m.content)+(m.role?5:0),0);}
+function fmtSize(b){if(b===undefined||b===null)return '';if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB';}
+
+// ===== 共享 AI 调用工具：构建消息上下文 + 执行工具循环（减少三个调用者的重复代码） =====
+async function buildAiContext(scenario) {
+  const msgs = [{ role: 'system', content: ROLE }];
+  let experiencesMsg = null;
+  if (Array.isArray(chatCfg.experiences) && chatCfg.experiences.length > 0) {
+    experiencesMsg = { role: 'system', content: chatCfg.experiences.map(e => e.timeRange + '\n' + e.summary).join('\n\n') };
+    msgs.push(experiencesMsg);
+  }
+  const hist = chatCfg.msgs || [];
+  if (hist.length > 0) {
+    msgs.push({ role: 'system', content: hist.map(x => '【' + x.time + '】' + (x.role === 'user' ? '主人' : '宠物') + '：' + x.content).join('\n') });
+  }
+  // 项目信息放在历史之后：文件操作后项目易变，置于历史之后可避免破坏“系统+摘要+历史”的缓存前缀
+  const projectInfoMsg = await injectProjectInfo(msgs);
+  const timeHint = '当前时间是' + getTime() + '，' +
+    (scenario === 'greet' ? '你可以自主决定做任何事' :
+     scenario === 'startup' ? '主人在电脑上打开了你，你可以自主决定做任何事' :
+     '主人跟你聊天了，你可以自主决定做任何事') +
+    '，若选择与主人聊天记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞';
+  const timeHintMsg = { role: 'system', content: timeHint };
+  msgs.push(timeHintMsg);
+  const tools = makeTools();
+  try { const m = await getMcpTools(); if (m.length > 0) tools.push(...m); } catch (e) {}
+  // instructionMsgs 仅放 timeHint：历史由 histBlock 注入、persona 由 systemRoleMsg 注入，
+  // 避免历史在每轮工具循环里被重复发送（原 slice(-2) 会把历史再塞一次）
+  return { msgs, tools, systemRoleMsg: msgs[0], projectInfoMsg, experiencesMsg, instructionMsgs: [timeHintMsg] };
+}
+// 构建发给 AI 的完整消息数组
+function buildAiMsgs(includeSummary=true){
+  const history=chatCfg.msgs||[];
+  const msgs=[
+    // 所有摘要注入为 system 消息
+    ...(includeSummary&&Array.isArray(chatCfg.experiences)&&chatCfg.experiences.length>0?chatCfg.experiences.map(e=>({role:'system',content:e.timeRange+'\n'+e.summary})):[]),
+    // 聊天记录按原始 role 展开，content 前加上说话人和时间
+    ...history.map(m=>({role:m.role,content:(m.role==='user'?'主人：':'宠物：')+' ['+m.time+'] '+m.content})),
+  ];
+  return msgs;
+}
+
+async function truncateMsgs(){
+  const ctxWindow = getModelContextWindow();
+  const limit=Math.floor(ctxWindow*0.15);
+
+  // 循环截断，直到消息量在限制内
+  for(let iter=0;iter<10;iter++){
+    const msgs=chatCfg.msgs||[];
+    if(msgs.length<2)return;
+
+    const allMsgs=buildAiMsgs();
+    const totalTokens=estMsgsTokens(allMsgs);
+    if(totalTokens<=limit)return;
+
+    // 超出 limit，取前 70% 的消息进行摘要，留 30%
+    const cutCount=Math.max(Math.ceil(msgs.length*0.7),1);
+    const dropped=msgs.slice(0,cutCount);
+    const kept=msgs.slice(cutCount);
+    if(dropped.length<1)return;
+
+    // 让 AI 生成摘要
+    const aiMsgs=[
+      {role:'system',content:ROLE},
+      ...dropped.map(m=>({role:m.role,content:(m.role==='user'?'主人：':'宠物：')+' ['+m.time+'] '+m.content})),
+      {role:'system',content:'作为主人的灵魂伴侣，为了能在有限的记忆中更好的理解主人，你需要对这些聊天记录进行摘要，这些聊天记录会消失变成摘要的形式出现在你的记忆中。'},
+    ];
+    const ac2=new AbortController();const t2=setTimeout(()=>ac2.abort(),30000);
+    const d=await callAI(aiMsgs,ac2.signal);
+    clearTimeout(t2);
+    if(!d)return;
+
+    const reply=d.choices[0].message.content.trim();
+
+    // 提取第一条和最后一条消息的时间作为时间范围
+    const firstTime=dropped[0]?.time||'未知';
+    const lastTime=dropped[dropped.length-1]?.time||'未知';
+
+    // 保存摘要到 .experiences.json（追加模式）
+    chatCfg.experiences=(chatCfg.experiences||[]).concat([{timeRange:firstTime+' - '+lastTime,summary:reply}]);
+    saveExperiences();
+
+    // 旧消息存档
+    try{
+      const oldArr=(await store.load('chat-archive'))||[];
+      await store.save('chat-archive',[...oldArr,...dropped]);
+    }catch(e){console.warn(e.message||e)}
+
+    // 检查 AI 调用期间是否有新消息加入（如 autoGreet），追加到截断结果后面
+    const extraMsgs=chatCfg.msgs.length>msgs.length?chatCfg.msgs.slice(msgs.length):[];
+    chatCfg.msgs=extraMsgs.length>0?[...kept,...extraMsgs]:kept;
+    saveChatCfg();
+    // 继续下一次循环，检查截断后是否仍需再截
+  }
+}
+
+let chatCfg={msgs:[]};
+// 统一加载所有配置（消除分散加载导致的不一致）
+async function loadAllConfigs(){
+  const [chat, exp, ai, voice]=await Promise.all([
+    store.load('chat-cfg'),
+    store.load('experiences'),
+    store.load('ai-cfg'),
+    store.load('voice'),
+  ]);
+  chatCfg=chat||{msgs:[]};
+  if(!chatCfg.msgs)chatCfg.msgs=[];
+  // 加载经验摘要
+  if(exp){
+    if(typeof exp==='string'&&exp.trim())chatCfg.experiences=[{timeRange:'',summary:exp}];
+    else if(Array.isArray(exp)&&exp.length>0)chatCfg.experiences=exp;
+    else if(exp&&exp.summary)chatCfg.experiences=[exp];
+    else chatCfg.experiences=[];
+  }else chatCfg.experiences=[];
+  // 加载 AI 配置
+  aiCfg=ai||{};
+  if(!aiCfg.url)aiCfg.url='https://api.deepseek.com/v1';
+  if(!aiCfg.model)aiCfg.model='deepseek-v4-flash';
+  // 上下文窗口值：0 和 undefined 都会触发 fallback
+  // 加载语音配置
+  if(voice)voiceEnabled=voice.enabled===true;
+}
+async function saveChatCfg(){
+  const save={msgs:chatCfg.msgs};
+  await store.save('chat-cfg',save)
+}
+async function saveExperiences(){
+  await store.save('experiences',chatCfg.experiences||[])
+}
+
+// ========= 情绪标签 → 动作映射 =========
+const emotionActions={
+  '开心':['开心爱心握拳L','开心爱心握拳R','开心爱心双拳','开心爱心伸左','开心爱心双指','开心星星握拳L','开心星星握拳R','开心星星双拳','开心星星伸左','开心星星伸右','开心卖萌握拳L','开心卖萌握拳R','开心卖萌伸左','开心卖萌双指','开心脸红爱心握拳','开心脸红星星握拳','开心脸红卖萌歪头','开心点头','开心摇头晃脑','开心超级开心'],
+  '生气':['生气黑脸握拳L','生气黑脸握拳R','生气黑脸双拳','生气黑脸伸左','生气黑脸伸右','生气黑脸摇头','生气黑脸持续摇头','生气黑脸左偏','生气黑脸右偏','生气黑脸低头不理','生气哀怒握拳L','生气哀怒握拳R','生气哀怒双拳','生气哀怒伸左','生气哀怒伸右','生气指前','生气持续低头','生气歪头','生气转身','生气暴怒'],
+  '悲伤':['悲伤低头握拳L','悲伤低头握拳R','悲伤低头双拳','悲伤低头伸左','悲伤低头伸右','悲伤长低头','悲伤摇头','悲伤左歪头','悲伤右歪头','悲伤低头双指','悲伤晕眩握拳L','悲伤晕眩握拳R','悲伤晕眩双拳','悲伤晕眩伸左','悲伤晕眩伸右','悲伤委屈摇头','悲伤委屈伸左','悲伤捂脸','悲伤抽泣','悲伤泪目'],
+  '疑问':['疑问握拳L歪头','疑问握拳R歪头','疑问双拳歪头','疑问伸左歪头','疑问伸右歪头','疑问双指歪头','疑问持续歪头','疑问左歪头','疑问右歪头','疑问低头','疑问抬头','疑惑握拳左歪','疑惑握拳右歪','疑惑双拳','疑惑伸左','疑惑伸右','疑惑挠头','疑问左顾','疑问右盼','疑惑不解'],
+  '惊讶':['惊讶张嘴握拳','惊讶张嘴双拳','惊讶张嘴伸左','惊讶张嘴伸右','惊讶张嘴双指','惊喜握拳L','惊喜握拳R','惊喜双拳','惊喜伸左','惊喜伸右','惊讶后退','惊讶低头','惊讶歪头','惊讶摇头','惊讶持续张嘴','惊喜脸红','惊喜歪头','目瞪口呆','惊讶点头','超级惊讶'],
+  '害羞':['害羞低头L','害羞低头R','害羞捂脸','害羞伸左低头','害羞伸右低头','害羞双指低头','害羞持续低头','害羞左歪头','害羞右歪头','害羞偷看','害羞爱心眼','害羞卖萌','害羞捂脸摇头','害羞转身','害羞扭捏','害羞伸左歪头','害羞伸右歪头','害羞低头玩手指','害羞不敢看','害羞心动'],
+}
+function parseEmotionTag(text){
+  const tags=[...text.matchAll(/\[情绪\s*:\s*([^\]]+)\]/g),...text.matchAll(/【情绪\s*:\s*([^】]+)】/g)];
+  const valid=Object.keys(emotionActions);
+  const matched=tags.map(t=>t[1].trim()).filter(t=>valid.includes(t));
+  return matched.length>0?matched[matched.length-1]:null
+}
+function pickRandom(arr){return arr[Math.floor(Math.random()*arr.length)]}
+function applyEmotionAction(raw){
+  const emo=parseEmotionTag(raw)
+  if(emo&&emotionActions[emo])doAction(pickRandom(emotionActions[emo]))
+}
+
+// 宠物窗口处理聊天消息
+// 记录当前聊天模式（用于语音输入）
+
+
+// 工具类请求：自带超时，且可被用户"中止"信号中断（signal 传外层 abort 控制器）
+async function fetchTool(url, opts = {}, { timeout = 120000, signal = null } = {}) {
+  const ctrl = new AbortController();
+  const tm = setTimeout(() => ctrl.abort(), timeout);
+  const onAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(tm);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+async function handleChatMsg(userText){
+  if(!(await window.api?.aiStart('chat'))){
+    window.api?.sendToChatWindow({type:'chat-reply',text:'当前有点忙，请稍后再试~'});
+    return;
+  }
+  _chatAborted=false;
+  let ac=new AbortController(),t;
+  const abortAi=()=>{if(ac)ac.abort();clearTimeout(t);fetch('/bash-abort',{method:'POST'}).catch(()=>{});};
+  _abortChatFn=abortAi;
+  const unsub=window.api?.onAiAbort(abortAi);
+  try{
+    lastChatTime=Date.now();
+    await truncateMsgs();
+    // 多轮工具循环
+    let finalReply='',emotionTag='';
+    let didMutate=false;
+      // 统一模式：同时支持陪聊和文件操作
+      const ctx=await buildAiContext('chat');
+      const messages=ctx.msgs;
+      const agentTools=ctx.tools;
+
+      // 保存各消息段引用（代替硬编码索引）
+      const systemRoleMsg=ctx.systemRoleMsg;
+      const projectInfoMsg=ctx.projectInfoMsg;
+      const instructionMsgs=ctx.instructionMsgs;
+      const result=await runChatFullLoop(messages,agentTools,{systemRoleMsg,projectInfoMsg,experiencesMsg:ctx.experiencesMsg,instructionMsgs}, ac.signal);
+      finalReply=result.finalReply;
+      didMutate=result.didMutate;
+      let sessionMsgs=result.sessionMsgs;
+    // 工具操作完成后若还没回复，让AI自然回复
+    if(!finalReply){
+      const replyMsgs=messages.map(m=>(m.role==='tool'&&m.content&&m.content.length>3000)?{...m,content:m.content.substring(0,200)+'\n...(文件内容省略，共'+m.content.split('\n').length+'行)'}:m);
+      replyMsgs.push({role:'system',content:'当前时间是'+getTime()+'，主人跟你聊天了，你可以自主决定做什么，若想跟主人聊天记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞'});
+      ac=new AbortController();t=setTimeout(()=>ac.abort(),30000);
+      const d=await callAI(replyMsgs,ac.signal,null,true);
+      clearTimeout(t);
+      if(d){
+        const m=d.choices[0].message;
+        // 二次回复也展示思考过程（折叠气泡），与普通聊天主路径保持一致
+        const think=m.reasoning_content||m.reasoning;
+        if(think&&think.trim())window.api?.sendToChatWindow({type:'ai-thinking',text:think});
+        if(m.content)finalReply=m.content.trim();
+      }
+    }
+    // 兜底：编辑过文件但没生成回复时，给确认提示
+    if(!finalReply&&didMutate){finalReply='已经按你说的改好啦~ 快看看效果吧';emotionTag='开心';}
+    if(!finalReply){window.api?.sendToChatWindow({type:'chat-reply',text:'宠物暂时无法回复，请再试一次'});return;}
+    // 用户已取消 → 丢弃回复，不保存不显示
+    if(_chatAborted)return;
+    // 从自然回复中提取情绪标签（AI 可能直接写 [情绪:开心] 在文本里）
+    if(!emotionTag && finalReply){const p=parseEmotionTag(finalReply);if(p)emotionTag=p;}
+    const rawReply=emotionTag&&!finalReply.includes('[情绪:')?finalReply+'  [情绪:'+emotionTag+']':finalReply;
+    const cleanText=cleanForDisplay(rawReply);
+    console.log('[宠窗AI回复]', rawReply);
+    chatCfg.msgs.push({role:'assistant',content:cleanText,time:getTime()});
+    await saveChatCfg();
+    bubble(cleanText,false,rawReply,true);
+    scheduleProactive();
+  }catch(e){if(e.name!=='AbortError'){console.error('chat AI error:',e.message,e.stack);window.api?.sendToChatWindow({type:'chat-reply',text:'AI调用失败: '+e.message});}scheduleProactive();}
+  finally{_abortChatFn=null;unsub?.();window.api?.aiDone();}
+}
+window.api?.onFromChatWindow(data=>{
+  if(data.type==='user-msg'){
+    _chatAborted=false;
+    // 把用户文字直接写入内存，不必读文件
+    chatCfg.msgs.push({role:'user',content:data.userText,time:getTime()});
+    handleChatMsg(data.userText);
+  }
+  if(data.type==='cancel-ai'){
+    _chatAborted=true;
+    if(_abortChatFn)_abortChatFn();
+  }
+  if(data.type==='user-answer'){
+    const entry=_pendingQuestions[data.id];
+    if(entry){delete _pendingQuestions[data.id];entry.resolve(data.answer);}
+  }
+
+  // 定期清理过期未回复的问题（防止内存泄漏）
+  const cleanupTimer = setInterval(() => {
+    if (_pageDestroyed) { clearInterval(cleanupTimer); return; }
+    const now = Date.now();
+    for (const [id, entry] of Object.entries(_pendingQuestions)) {
+      if (entry.askedAt && now - entry.askedAt > 130000) {
+        delete _pendingQuestions[id];
+      }
+    }
+  }, 300000); // 每5分钟清理一次
+
+});
+window.api?.onAiCfgWindowClosed(async()=>{
+  await loadAllConfigs();
+});
+window.api?.onSttCfgWindowClosed(async()=>{
+  await loadAllConfigs();
+});
+
+
+function getTime(){ return window.api?.getTime ? window.api.getTime() : (()=>{const d=new Date();return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');})(); }
+
+async function generateGreeting(){
+  _chatAborted=false;
+  if(!aiCfg.apiKey)return null;
+  if(aiBusy)return null;
+  if(!(await window.api?.aiStart('startup')))return null;
+  aiBusy=true;
+  let ac=new AbortController(),t;
+  const abortAi=()=>{if(ac)ac.abort();clearTimeout(t);fetch('/bash-abort',{method:'POST'}).catch(()=>{});};
+  const unsub=window.api?.onAiAbort(abortAi);
+  try{
+    const ctx=await buildAiContext('startup');
+    const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,projectInfoMsg:ctx.projectInfoMsg,experiencesMsg:ctx.experiencesMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
+    if(!r.finalReply)return null;
+    // 用户点击中断后丢弃回复
+    if(_chatAborted)return null;
+    const raw=r.finalReply;
+    const text=cleanForDisplay(raw);
+    return {text,raw};
+  }catch(e){return null}
+  finally{aiBusy=false;unsub?.();window.api?.aiDone();}
+}
+
+function waitModel(){
+  return new Promise(r=>{const c=()=>{if(model&&model.internalModel&&model.internalModel.coreModel)r();else setTimeout(c,50)};c()});
+}
+
+function getSinceLastSec(){
+  const msgs=chatCfg.msgs||[];
+  if(!msgs.length)return 0;
+  const last=msgs[msgs.length-1];
+  if(!last.time)return 0;
+  const m=last.time.match(/(\d+)\/(\d+)\/(\d+)[^\d]+(\d+):(\d+)/);
+  if(!m)return 0;
+  const dt=new Date(+m[1],+m[2]-1,+m[3],+m[4]||0,+m[5]||0).getTime();
+  if(isNaN(dt))return 0;
+  return Math.floor((Date.now()-dt)/1000);
+}
+function fmtTime(s){
+  if(s<=0)return '刚刚';
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
+  let r='';
+  if(h>0)r+=h+'时';
+  if(m>0||h>0)r+=m+'分';
+  if(sec>0)r+=sec+'秒';
+  return r;
+}
+// 共享问候语生成：根据离开时长获取表情和话术池，返回 {emotions, pool}
+function getGreetingPool(secs){
+  let emotions,pool;
+  if(secs<900){emotions=['开心','害羞'];pool=['嘿嘿，才一会儿没见就想你啦 ♥','主人~我一直在这里等你呢','有点想主人了…','嘿嘿，主人还在呀~','主人~我一直在哦','嘻嘻，又见到主人好开心 ♥','嘿嘿~你回来啦','刚走一会儿就想你啦 ♥']}
+  else if(secs<1800){emotions=['疑问','开心'];pool=['嗯…主人在干嘛呢','怎么没动静了呀','唔…主人还在吗','主人是不是在忙呀','好安静…主人去哪了','咦？怎么不理我了','主人~你在忙什么呀','嘿嘿，还在呢~']}
+  else if(secs<3600){emotions=['疑问','悲伤'];pool=['好无聊呀~','一个人好安静…','嗯…发了好久的呆','好想和主人说话…','唔…好没意思','主人理理我嘛~','怎么这么久不说话呀','一个人好无聊…主人理理我']}
+  else if(secs<10800){emotions=['开心','害羞'];pool=['好想主人呀 ♥','想你想得不行了~','主人快回来陪我嘛','等得心都痒了…','好想好想和主人说话','主人~我好想你呀','终于回来了~好开心 ♥','等你好久了~想你了']}
+  else if(secs<28800){emotions=['悲伤','疑问'];pool=['等了好久好久…','主人怎么还不来呀','好孤单…好想主人','主人是不是忘记我了','一个人好寂寞…','一直在等你回来…','主人去哪了呀…好想你','今天还会来吗…']}
+  else if(secs<86400){emotions=['悲伤','害羞'];pool=['一天都没见到主人了…','等了一整天，好想好想你','主人去哪了呀…','好孤单…主人理理我','以为主人不来了…','今天又不来看我了吗','一天的等待好漫长…','好想你呀…终于见到你了']}
+  else if(secs<259200){emotions=['悲伤','疑问'];pool=['主人好久没来了…','好想主人…真的好想','主人是不是把我忘记了','一个人好寂寞…','好久好久没陪我了','主人还记得我吗…','以为主人不要我了…','每天都在等你回来…']}
+  else{emotions=['生气','悲伤'];pool=['主人是不是不要我了…','每天都在等主人…','好生气！都不理我','已经好久没来了…','以为主人不要我了','哼！再不来我就生气了','你真的不要我了吗…','再不来我真的生气了哦！']}
+  return {emotions,pool};
+}
+
+// 关闭并释放 AudioContext
+function closeAudioCtx(){
+  if(audioCtx&&audioCtx.state!=='closed'){
+    try{audioCtx.close()}catch(e){}
+    audioCtx=null;
+  }
+}
+// 预预热 AudioContext + Edge TTS 连接，加速首次语音
+function warmAudio(){
+  // 先关闭旧 AudioContext 再新建，防止资源泄漏
+  closeAudioCtx();
+  try{audioCtx=new (window.AudioContext||window.webkitAudioContext)()}catch(e){console.warn(e.message||e)}
+  if(audioCtx&&audioCtx.state==='suspended')audioCtx.resume().catch(()=>{});
+  // 预热 Edge TTS + decodeAudioData 流水线
+  if(voiceEnabled){
+    fetch('/tts',{method:'POST',headers:{'Content-Type':'text/plain'},body:'预热'}).then(async r=>{
+      if(!r.ok)return;
+      const buf=await r.arrayBuffer();
+      if(buf&&buf.byteLength>=100&&audioCtx)try{audioCtx.decodeAudioData(buf.slice(0))}catch(e){}
+    }).catch(()=>{});
+  }
+}
+// 页面关闭/销毁时释放资源
+window.addEventListener('beforeunload',()=>{closeAudioCtx();_pageDestroyed=true;});
+// 自动眨眼：每 3~7 秒快速闭眼再睁眼
+function startBlink(){
+  clearTimeout(blinkTimer);
+  const doBlink=()=>{
+    setP('ParamEyeLOpen',0);
+    setP('ParamEyeROpen',0);
+    setTimeout(()=>{
+      setP('ParamEyeLOpen',1);
+      setP('ParamEyeROpen',1);
+    },120);
+  };
+  const scheduleBlink=()=>{
+    blinkTimer=setTimeout(()=>{
+      doBlink();
+      scheduleBlink();
+    },3000+Math.random()*4000);
+  };
+  scheduleBlink();
+}
+// ========= 动作动画系统（独立于当前表情/手势） =========
+function getCM(){return model?.internalModel?.coreModel}
+let animSeq=0;
+let currentActionSeq=0;
+let _pageDestroyed=false; // 页面销毁标记，用于停止动画
+function animateTo(id,to,dur){
+  return new Promise(r=>{const cm=getCM();if(!cm||_pageDestroyed){r();return}
+    const idx=getPIdx(id);if(idx<0){r();return}
+    const from=cm._parameterValues[idx],st=performance.now(),seq=currentActionSeq
+    const tick=()=>{
+      if(seq!==currentActionSeq||_pageDestroyed){r();return} // 被新动作取消或页面已销毁
+      const t=Math.min((performance.now()-st)/dur,1)
+      const e=t<.5?2*t*t:-1+(4-2*t)*t
+      cm._parameterValues[idx]=from+(to-from)*e
+      if(t<1)requestAnimationFrame(tick);else r()}
+    tick()})
+}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+function parallel(arr){return Promise.all(arr)}
+
+async function doAction(name){
+  if(!getCM())return
+  const mySeq=++animSeq;
+  currentActionSeq=mySeq;
+  try{
+    switch(name){
+      // ==================== 😊 开心（20个动作） ====================
+      // 爱心眼 + 左手握拳 + 微笑
+      case'开心爱心握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.2,200)]);await sleep(3500);break
+      // 爱心眼 + 右手握拳 + 右歪头
+      case'开心爱心握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',10,400)]);await sleep(3500);break
+      // 爱心眼 + 双拳 + 点头
+      case'开心爱心双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<2;i++)await animateTo('ParamAngleY',i%2?0:-8,200);await sleep(2500);break
+      // 爱心眼 + 左手食指 + 左歪头
+      case'开心爱心伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',-10,400)]);await sleep(3500);break
+      // 爱心眼 + 双指 + 歪头微笑
+      case'开心爱心双指':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',8,400),animateTo('ParamMouthOpenY',.2,200)]);await sleep(3500);break
+      // 星星眼 + 左手握拳 + 点头
+      case'开心星星握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<3;i++)await animateTo('ParamAngleY',i%2?0:-8,150);await sleep(2000);break
+      // 星星眼 + 右手握拳 + 左歪头
+      case'开心星星握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',-12,400)]);await sleep(3500);break
+      // 星星眼 + 双拳 + 摇头
+      case'开心星星双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<4;i++)await animateTo('ParamAngleX',i%2?0:14,120);await sleep(2500);break
+      // 星星眼 + 左手食指 + 脸红 + 低头
+      case'开心星星伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-8,400)]);await sleep(4000);break
+      // 星星眼 + 右手小指 + 右歪头
+      case'开心星星伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',12,400)]);await sleep(3500);break
+      // 卖萌 + 左手握拳 + 歪头
+      case'开心卖萌握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJQQ',1,300),animateTo('ParamAngleZ',10,400)]);await sleep(3500);break
+      // 卖萌 + 右手握拳 + 左歪头
+      case'开心卖萌握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJQQ',1,300),animateTo('ParamAngleZ',-10,400)]);await sleep(3500);break
+      // 卖萌 + 左手食指 + 持续左歪头
+      case'开心卖萌伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJQQ',1,300),animateTo('ParamAngleZ',-14,500)]);await sleep(5000);break
+      // 卖萌 + 双指 + 点头
+      case'开心卖萌双指':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJQQ',1,300)]);for(let i=0;i<2;i++)await animateTo('ParamAngleY',i%2?0:-10,200);await sleep(2500);break
+      // 脸红 + 爱心眼 + 左手握拳 + 低头
+      case'开心脸红爱心握拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-12,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);await sleep(4000);break
+      // 脸红 + 星星眼 + 右手握拳 + 低头
+      case'开心脸红星星握拳':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-10,400)]);await sleep(4000);break
+      // 脸红 + 卖萌 + 持续歪头
+      case'开心脸红卖萌歪头':await parallel([animateTo('AJLH',1,300),animateTo('AJQQ',1,300),animateTo('ParamAngleZ',12,500)]);await sleep(5000);break
+      // 双拳 + 星星眼 + 连续点头
+      case'开心点头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<5;i++)await animateTo('ParamAngleY',i%2?0:-10,120);await sleep(3000);break
+      // 双拳 + 爱心眼 + 摇头晃脑
+      case'开心摇头晃脑':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<4;i++){await animateTo('ParamAngleX',14,200);await animateTo('ParamAngleX',-14,200)}await sleep(2000);break
+      // 双拳 + 星星眼 + 脸红 + 爱心眼参数 + 低头微笑
+      case'开心超级开心':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-8,400),animateTo('ParamEyeLOpen',.3,300),animateTo('ParamEyeROpen',.3,300),animateTo('ParamMouthOpenY',.2,200)]);await sleep(4500);break
+      // ==================== 😠 生气（20个动作） ====================
+      // 黑脸 + 左手握拳 + 低头
+      case'生气黑脸握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleY',-6,400)]);await sleep(3500);break
+      // 黑脸 + 右手握拳 + 低头
+      case'生气黑脸握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleY',-6,400)]);await sleep(3500);break
+      // 黑脸 + 双拳 + 低头
+      case'生气黑脸双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleY',-8,400)]);await sleep(3500);break
+      // 黑脸 + 左手食指 + 左歪头
+      case'生气黑脸伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',-12,400)]);await sleep(3500);break
+      // 黑脸 + 右手小指 + 右歪头
+      case'生气黑脸伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',12,400)]);await sleep(3500);break
+      // 黑脸 + 连续摇头
+      case'生气黑脸摇头':await parallel([animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<6;i++)await animateTo('ParamAngleX',i%2?0:22,100);await sleep(2000);break
+      // 黑脸 + 持续长摇头
+      case'生气黑脸持续摇头':await parallel([animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<10;i++)await animateTo('ParamAngleX',i%2?0:22,100);await sleep(1500);break
+      // 黑脸 + 左手握拳 + 持续左偏
+      case'生气黑脸左偏':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',-15,500)]);await sleep(5000);break
+      // 黑脸 + 右手握拳 + 持续右偏
+      case'生气黑脸右偏':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',15,500)]);await sleep(5000);break
+      // 黑脸 + 双拳 + 持续低头不理
+      case'生气黑脸低头不理':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleY',-14,600),animateTo('ParamEyeLOpen',.2,300),animateTo('ParamEyeROpen',.2,300)]);await sleep(6000);break
+      // 哀怒 + 左手握拳 + 低头
+      case'生气哀怒握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJAINU',1,300),animateTo('ParamAngleY',-8,400)]);await sleep(4000);break
+      // 哀怒 + 右手握拳 + 低头
+      case'生气哀怒握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAINU',1,300),animateTo('ParamAngleY',-8,400)]);await sleep(4000);break
+      // 哀怒 + 双拳 + 前倾
+      case'生气哀怒双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAINU',1,300),animateTo('ParamAngleY',-10,400),animateTo('ParamAngleX',-8,300)]);await sleep(3500);break
+      // 哀怒 + 左手食指 + 左歪头
+      case'生气哀怒伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJAINU',1,300),animateTo('ParamAngleZ',-10,400)]);await sleep(3500);break
+      // 哀怒 + 右手小指 + 右歪头
+      case'生气哀怒伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJAINU',1,300),animateTo('ParamAngleZ',10,400)]);await sleep(3500);break
+      // 左手食指 + 黑脸 + 前倾 + 摇头
+      case'生气指前':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleY',-10,300)]);for(let i=0;i<4;i++)await animateTo('ParamAngleX',i%2?0:16,120);await sleep(2000);break
+      // 双拳 + 哀怒 + 持续低头
+      case'生气持续低头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAINU',1,300),animateTo('ParamAngleY',-15,600)]);await sleep(6000);break
+      // 左手握拳 + 黑脸 + 持续歪头
+      case'生气歪头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',14,500)]);await sleep(5000);break
+      // 右手握拳 + 黑脸 + 持续左偏 + 低头
+      case'生气转身':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',-18,500),animateTo('ParamAngleY',-8,400)]);await sleep(5000);break
+      // 双拳 + 黑脸 + 摇头 + 低头
+      case'生气暴怒':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJHL',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleY',-8,300)]);for(let i=0;i<8;i++)await animateTo('ParamAngleX',i%2?0:22,80);await sleep(2000);break
+      // ==================== 😢 悲伤（20个动作） ====================
+      // 晕眩 + 左手握拳 + 低头
+      case'悲伤低头握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-10,400)]);await sleep(4000);break
+      // 晕眩 + 右手握拳 + 低头
+      case'悲伤低头握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-10,400)]);await sleep(4000);break
+      // 晕眩 + 双拳 + 低头
+      case'悲伤低头双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-12,400)]);await sleep(4000);break
+      // 晕眩 + 左手食指 + 低头
+      case'悲伤低头伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-8,400)]);await sleep(4000);break
+      // 晕眩 + 右手小指 + 低头
+      case'悲伤低头伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-8,400)]);await sleep(4000);break
+      // 晕眩 + 左手握拳 + 持续低头（长时）
+      case'悲伤长低头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-15,600),animateTo('ParamEyeLOpen',.2,300),animateTo('ParamEyeROpen',.2,300)]);await sleep(7000);break
+      // 晕眩 + 双拳 + 摇头
+      case'悲伤摇头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300)]);for(let i=0;i<5;i++)await animateTo('ParamAngleX',i%2?0:16,150);await sleep(2000);break
+      // 晕眩 + 左手握拳 + 左歪头
+      case'悲伤左歪头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleZ',-12,400)]);await sleep(3500);break
+      // 晕眩 + 右手握拳 + 右歪头
+      case'悲伤右歪头':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleZ',12,400)]);await sleep(3500);break
+      // 晕眩 + 双指 + 低头
+      case'悲伤低头双指':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-10,400)]);await sleep(4000);break
+      // 晕眩 + 左手握拳 + 低头
+      case'悲伤晕眩握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-6,400)]);await sleep(4000);break
+      // 晕眩 + 右手握拳 + 低头
+      case'悲伤晕眩握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-6,400)]);await sleep(4000);break
+      // 晕眩 + 双拳
+      case'悲伤晕眩双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamMouthOpenY',.3,300)]);await sleep(3500);break
+      // 晕眩 + 左手食指 + 歪头
+      case'悲伤晕眩伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleZ',-10,400)]);await sleep(3500);break
+      // 晕眩 + 右手小指 + 歪头
+      case'悲伤晕眩伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleZ',10,400)]);await sleep(3500);break
+      // 晕眩 + 双指 + 摇头
+      case'悲伤委屈摇头':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300)]);for(let i=0;i<4;i++)await animateTo('ParamAngleX',i%2?0:14,150);await sleep(2000);break
+      // 左手食指 + 晕眩 + 低头 + 歪头
+      case'悲伤委屈伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-8,400),animateTo('ParamAngleZ',-8,300)]);await sleep(4000);break
+      // 双拳 + 晕眩 + 持续低头
+      case'悲伤捂脸':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-16,600),animateTo('ParamEyeLOpen',.1,300),animateTo('ParamEyeROpen',.1,300)]);await sleep(6000);break
+      // 双拳 + 晕眩 + 低头 + 微点头（抽泣）
+      case'悲伤抽泣':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-12,400)]);for(let i=0;i<6;i++){await animateTo('ParamAngleY',-15,200);await animateTo('ParamAngleY',-10,200)}await sleep(2000);break
+      // 左手握拳 + 晕眩 + 低头
+      case'悲伤泪目':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYYY',1,300),animateTo('AJZ1',1,300),animateTo('AJYGGYC',1,300),animateTo('ParamAngleY',-10,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);await sleep(4000);break
+      // ==================== ❓ 疑问（20个动作） ====================
+      // 问号 + 左手握拳 + 歪头
+      case'疑问握拳L歪头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',12,400)]);await sleep(3500);break
+      // 问号 + 右手握拳 + 歪头
+      case'疑问握拳R歪头':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',12,400)]);await sleep(3500);break
+      // 问号 + 双拳 + 歪头
+      case'疑问双拳歪头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',15,400)]);await sleep(3500);break
+      // 问号 + 左手食指 + 歪头
+      case'疑问伸左歪头':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',10,400)]);await sleep(3500);break
+      // 问号 + 右手小指 + 歪头
+      case'疑问伸右歪头':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',10,400)]);await sleep(3500);break
+      // 问号 + 双指 + 歪头
+      case'疑问双指歪头':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',12,400)]);await sleep(3500);break
+      // 问号 + 左手握拳 + 持续歪头
+      case'疑问持续歪头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',16,500)]);await sleep(5500);break
+      // 问号 + 右手握拳 + 左歪头
+      case'疑问左歪头':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',-10,400)]);await sleep(3500);break
+      // 问号 + 左手握拳 + 右歪头
+      case'疑问右歪头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',10,400)]);await sleep(3500);break
+      // 问号 + 左手握拳 + 低头
+      case'疑问低头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleY',-8,400)]);await sleep(3500);break
+      // 问号 + 右手握拳 + 抬头
+      case'疑问抬头':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleY',10,400)]);await sleep(3500);break
+      // 左手握拳 + 问号 + 摇头 + 歪头
+      case'疑惑握拳左歪':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',12,400)]);for(let i=0;i<3;i++)await animateTo('ParamAngleX',i%2?0:12,150);await sleep(2000);break
+      // 右手握拳 + 问号 + 摇头 + 歪头
+      case'疑惑握拳右歪':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',-12,400)]);for(let i=0;i<3;i++)await animateTo('ParamAngleX',i%2?0:12,150);await sleep(2000);break
+      // 问号 + 双拳 + 先左再右歪头
+      case'疑惑双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300)]);await animateTo('ParamAngleZ',-12,300);await animateTo('ParamAngleZ',12,300);await sleep(2500);break
+      // 问号 + 左手食指 + 低头 + 歪头
+      case'疑惑伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleY',-5,300),animateTo('ParamAngleZ',-8,300)]);await sleep(3500);break
+      // 问号 + 右手小指 + 低头 + 歪头
+      case'疑惑伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleY',-5,300),animateTo('ParamAngleZ',8,300)]);await sleep(3500);break
+      // 右手握拳 + 问号 + 低头 + 歪头（挠头）
+      case'疑惑挠头':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleY',-8,300),animateTo('ParamAngleZ',10,400)]);await sleep(4000);break
+      // 左手握拳 + 问号 + 左看
+      case'疑问左顾':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',-15,400)]);await sleep(3500);break
+      // 右手握拳 + 问号 + 右看
+      case'疑问右盼':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',15,400)]);await sleep(3500);break
+      // 问号 + 双拳 + 摇头 + 歪头
+      case'疑惑不解':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJJZZ',1,300),animateTo('ParamAngleZ',10,400)]);for(let i=0;i<4;i++)await animateTo('ParamAngleX',i%2?0:14,120);await sleep(2000);break
+      // ==================== 😲 惊讶（20个动作） ====================
+      // 星星眼 + 左手握拳 + 张嘴
+      case'惊讶张嘴握拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.8,100),animateTo('ParamAngleY',-10,150)]);await sleep(2500);break
+      // 星星眼 + 双拳 + 张嘴 + 抬头
+      case'惊讶张嘴双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',1,80),animateTo('ParamAngleY',12,150)]);await sleep(2500);break
+      // 星星眼 + 左手食指 + 张嘴 + 歪头
+      case'惊讶张嘴伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.8,100),animateTo('ParamAngleZ',-8,300)]);await sleep(2500);break
+      // 星星眼 + 右手小指 + 张嘴 + 歪头
+      case'惊讶张嘴伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.8,100),animateTo('ParamAngleZ',8,300)]);await sleep(2500);break
+      // 星星眼 + 双指 + 张嘴
+      case'惊讶张嘴双指':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.8,100)]);await sleep(2500);break
+      // 爱心眼 + 左手握拳 + 微笑
+      case'惊喜握拳L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.2,200)]);await sleep(3500);break
+      // 爱心眼 + 右手握拳 + 微笑 + 歪头
+      case'惊喜握拳R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',10,400),animateTo('ParamMouthOpenY',.2,200)]);await sleep(3500);break
+      // 爱心眼 + 双拳 + 点头
+      case'惊喜双拳':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<2;i++)await animateTo('ParamAngleY',i%2?0:-8,200);await sleep(2500);break
+      // 爱心眼 + 左手食指 + 微笑 + 歪头
+      case'惊喜伸左':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',8,400),animateTo('ParamMouthOpenY',.2,200)]);await sleep(3500);break
+      // 爱心眼 + 右手小指 + 微笑 + 歪头
+      case'惊喜伸右':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',-8,400),animateTo('ParamMouthOpenY',.2,200)]);await sleep(3500);break
+      // 星星眼 + 左手握拳 + 张嘴 + 抬头（后退）
+      case'惊讶后退':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',1,80),animateTo('ParamAngleY',15,150)]);await sleep(2500);break
+      // 星星眼 + 左手握拳 + 张嘴 + 低头
+      case'惊讶低头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.8,100),animateTo('ParamAngleY',-10,300)]);await sleep(2500);break
+      // 星星眼 + 右手握拳 + 张嘴 + 歪头
+      case'惊讶歪头':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.8,100),animateTo('ParamAngleZ',12,300)]);await sleep(2500);break
+      // 星星眼 + 双拳 + 摇头
+      case'惊讶摇头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<3;i++)await animateTo('ParamAngleX',i%2?0:16,120);await sleep(2000);break
+      // 星星眼 + 持续张嘴
+      case'惊讶持续张嘴':await parallel([animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.6,200)]);await sleep(5000);break
+      // 脸红 + 爱心眼 + 左手握拳 + 低头 + 微笑
+      case'惊喜脸红':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-10,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300),animateTo('ParamMouthOpenY',.2,200)]);await sleep(4000);break
+      // 爱心眼 + 右手小指 + 歪头 + 微笑
+      case'惊喜歪头':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamAngleZ',-10,400),animateTo('ParamMouthOpenY',.2,200)]);await sleep(3500);break
+      // 星星眼 + 双拳 + 张嘴 + 持续低头
+      case'目瞪口呆':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',.8,100),animateTo('ParamAngleY',-10,300),animateTo('ParamAngleZ',6,200)]);await sleep(5000);break
+      // 星星眼 + 左手握拳 + 点头
+      case'惊讶点头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200)]);for(let i=0;i<3;i++)await animateTo('ParamAngleY',i%2?0:-8,150);await sleep(2000);break
+      // 星星眼 + 双拳 + 张嘴 + 歪头 + 瞪眼
+      case'超级惊讶':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJXX',1,200),animateTo('AJBXX',1,200),animateTo('AJYGGYC',1,200),animateTo('ParamMouthOpenY',1,80),animateTo('ParamAngleZ',12,300),animateTo('ParamAngleY',-8,200),animateTo('ParamEyeLOpen',1.3,80),animateTo('ParamEyeROpen',1.3,80)]);await sleep(3000);break
+      // ==================== 😳 害羞（20个动作） ====================
+      // 脸红 + 左手握拳 + 低头
+      case'害羞低头L':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-12,400),animateTo('ParamEyeLOpen',.3,300),animateTo('ParamEyeROpen',.3,300)]);await sleep(4000);break
+      // 脸红 + 右手握拳 + 低头
+      case'害羞低头R':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-12,400),animateTo('ParamEyeLOpen',.3,300),animateTo('ParamEyeROpen',.3,300)]);await sleep(4000);break
+      // 脸红 + 双拳 + 低头（捂脸）
+      case'害羞捂脸':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-14,400),animateTo('ParamEyeLOpen',.2,300),animateTo('ParamEyeROpen',.2,300)]);await sleep(4500);break
+      // 脸红 + 左手食指 + 低头
+      case'害羞伸左低头':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-10,400),animateTo('ParamEyeLOpen',.3,300),animateTo('ParamEyeROpen',.3,300)]);await sleep(4000);break
+      // 脸红 + 右手小指 + 低头
+      case'害羞伸右低头':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-10,400),animateTo('ParamEyeLOpen',.3,300),animateTo('ParamEyeROpen',.3,300)]);await sleep(4000);break
+      // 脸红 + 双指 + 低头
+      case'害羞双指低头':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-12,400),animateTo('ParamEyeLOpen',.3,300),animateTo('ParamEyeROpen',.3,300)]);await sleep(4000);break
+      // 脸红 + 左手握拳 + 持续低头（长时）
+      case'害羞持续低头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-16,600),animateTo('ParamEyeLOpen',.2,300),animateTo('ParamEyeROpen',.2,300)]);await sleep(7000);break
+      // 脸红 + 左手握拳 + 左歪头
+      case'害羞左歪头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleZ',-12,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);await sleep(4000);break
+      // 脸红 + 右手握拳 + 右歪头
+      case'害羞右歪头':await parallel([animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleZ',12,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);await sleep(4000);break
+      // 脸红 + 双拳 + 低头 + 快速抬头（偷看）
+      case'害羞偷看':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-14,400),animateTo('ParamEyeLOpen',.2,300),animateTo('ParamEyeROpen',.2,300)]);await sleep(1500);await animateTo('ParamAngleY',-2,200);await sleep(800);await animateTo('ParamAngleY',-14,200);await sleep(2000);break
+      // 脸红 + 爱心眼 + 左手握拳 + 低头
+      case'害羞爱心眼':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-12,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);await sleep(4500);break
+      // 脸红 + 卖萌 + 左手握拳 + 歪头
+      case'害羞卖萌':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('AJQQ',1,300),animateTo('ParamAngleZ',10,400),animateTo('ParamAngleY',-5,300)]);await sleep(4000);break
+      // 脸红 + 双拳 + 摇头
+      case'害羞捂脸摇头':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300)]);for(let i=0;i<4;i++)await animateTo('ParamAngleX',i%2?0:14,150);await sleep(2000);break
+      // 脸红 + 左手握拳 + 左偏头 + 低头
+      case'害羞转身':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleZ',-16,500),animateTo('ParamAngleY',-8,400),animateTo('ParamEyeLOpen',.3,300),animateTo('ParamEyeROpen',.3,300)]);await sleep(5000);break
+      // 脸红 + 左手握拳 + 左右微摇（扭捏）
+      case'害羞扭捏':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);for(let i=0;i<6;i++){await animateTo('ParamAngleX',8,150);await animateTo('ParamAngleX',-8,150)}await sleep(1500);break
+      // 脸红 + 左手食指 + 歪头
+      case'害羞伸左歪头':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleZ',-8,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);await sleep(4000);break
+      // 脸红 + 右手小指 + 歪头
+      case'害羞伸右歪头':await parallel([animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleZ',8,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300)]);await sleep(4000);break
+      // 脸红 + 双指 + 低头（玩手指）
+      case'害羞低头玩手指':await parallel([animateTo('AJZSS1',2,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',2,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-12,400),animateTo('ParamEyeLOpen',.2,300),animateTo('ParamEyeROpen',.2,300)]);await sleep(5000);break
+      // 脸红 + 双拳 + 持续低头 + 半闭眼（不敢看）
+      case'害羞不敢看':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJYSS1',1,200),animateTo('AJYSYC',2,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-16,600),animateTo('ParamEyeLOpen',.1,400),animateTo('ParamEyeROpen',.1,400)]);await sleep(6500);break
+      // 脸红 + 爱心眼 + 左手握拳 + 低头 + 微笑
+      case'害羞心动':await parallel([animateTo('AJZSS1',1,200),animateTo('AJZSYC',2,200),animateTo('AJAX',1,200),animateTo('AJBAX',1,200),animateTo('AJYGGYC',1,200),animateTo('AJLH',1,300),animateTo('ParamAngleY',-10,400),animateTo('ParamEyeLOpen',.4,300),animateTo('ParamEyeROpen',.4,300),animateTo('ParamMouthOpenY',.15,200)]);await sleep(4500);break
+    }
+    // 平滑复位所有临时参数，避免瞬间跳动
+    if(!voiceAnimLock&&currentActionSeq===mySeq)await parallel([
+      ...expAll.map(p=>animateTo(p,0,200)),
+      ...gestAll.map(p=>animateTo(p,0,200)),
+      animateTo('ParamAngleX',0,200),animateTo('ParamAngleY',0,200),animateTo('ParamAngleZ',0,200),
+      animateTo('ParamMouthOpenY',0,200),animateTo('ParamMouthForm',0,200),
+      animateTo('ParamEyeLOpen',1,200),animateTo('ParamEyeROpen',1,200),
+      animateTo('WZY',0,200),
+    ]);
+  }finally{
+    // 语音播放时不复位，由 onended 统一处理
+    if(voiceAnimLock)return;
+    // 如果已被新动作取代，跳过清理（避免干扰新动作）
+    if(currentActionSeq!==mySeq)return;
+    // 兜底复位（此时参数已在平滑动画中到达目标值）
+    setP('ParamAngleX',0);setP('ParamAngleY',0);setP('ParamAngleZ',0);
+    setP('ParamMouthOpenY',0);setP('ParamMouthForm',0);
+    setP('ParamEyeLOpen',1);setP('ParamEyeROpen',1);
+    setP('WZY',0);
+    // 恢复用户手动选中的表情（如果有）
+    if(state.expr&&expParams[state.expr])expParams[state.expr].forEach(([p,val])=>setP(p,val));
+    // 恢复用户手动选中的手势（如果有）
+    Object.values(state.gest).forEach(g=>{if(gestParams[g])gestParams[g].forEach(([p,val])=>setP(p,val))});
+  }
+}
+;(async()=>{
+  try{
+    await loadAllConfigs();
+    warmAudio();
+    await waitModel();
+    startBlink();
+    const greeting=await generateGreeting();
+    if(greeting && !_chatAborted){
+      // 先存文件再处理 UI
+      chatCfg.msgs.push({role:'assistant',content:cleanForDisplay(greeting.raw),time:getTime()});
+      await saveChatCfg();
+      bubble(greeting.text,false,greeting.raw,true);
+    }else{
+      const secs=getSinceLastSec();
+      if(secs>0){
+        const g=getGreetingPool(secs);
+        const msg=pickRandom(g.pool);
+        const emo=pickRandom(g.emotions);
+        bubble(msg,false,'[情绪:'+emo+']',true);
+      }else{
+        const welcome=pickRandom(['嘿嘿，你来了呀 ♥','等你很久啦~','终于见到你了 ♥','嗨~想你了','你终于来啦！好开心 ♥','嘻嘻~又见面了','我就知道你会来 ♥','还以为你今天不来了呢~']);
+        const welEmo=pickRandom(['开心','害羞']);
+        bubble(welcome,false,'[情绪:'+welEmo+']',true);
+      }
+    }
+    lastChatTime=Date.now();
+    scheduleProactive();
+  }catch(e){console.error('启动失败:',e);document.body.innerHTML='<div style="padding:20px;color:red;font:14px sans-serif">启动失败:<br>'+e.message+'</div>'}
+})();
+</script>
+</body>
+</html>

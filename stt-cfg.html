@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>语音输入配置</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#f5f5f5;display:flex;flex-direction:column;font:13px/1.5 'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif}
+#hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,#ff9ec4,#ff6b9d);color:#fff;font-weight:bold;font-size:14px;flex-shrink:0;-webkit-app-region:drag}
+#hdr .btn{display:inline-block;cursor:pointer;font-size:15px;opacity:.8;padding:0 6px;-webkit-app-region:no-drag}
+#hdr .btn:hover{opacity:1}
+.box{flex:1;background:#fff;padding:20px;display:flex;flex-direction:column;overflow-y:auto}
+label{display:block;margin:8px 0 4px;color:#666;font-size:12px}
+input{width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:8px;outline:none;font-size:13px;background:#fff;font-family:inherit}
+input:focus{border-color:#ff6b9d}
+.pwd-wrap{position:relative;display:flex;align-items:center}
+.pwd-wrap input{padding-right:36px}
+.pwd-toggle{position:absolute;right:8px;cursor:pointer;font-size:16px;opacity:.5;user-select:none;line-height:1;padding:0 2px}
+.pwd-toggle:hover{opacity:1}
+.btns{display:flex;gap:8px;margin-top:14px}
+.btns button{flex:1;border:none;border-radius:8px;padding:7px;cursor:pointer;font-size:13px}
+.btns .save{background:#ff6b9d;color:#fff}
+.btns .save:hover{background:#ff528a}
+.btns .cancel{background:#f0f0f0;color:#666}
+.btns .cancel:hover{background:#e0e0e0}
+#msg{color:#e74c3c;font-size:12px;text-align:center;margin-top:10px;min-height:18px}
+.tip{font-size:11px;color:#999;margin-top:6px;line-height:1.6}
+</style></head>
+<body>
+<div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>⚙️ 配置语音输入</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
+<div class="box">
+<label>STT 地址</label>
+<input id="cfg-stt-base" placeholder="https://api.openai.com/v1"/>
+<label>STT Key</label>
+<div class="pwd-wrap"><input id="cfg-stt-key" type="password" placeholder="sk-..."/><span class="pwd-toggle" onclick="toggleSttKey()">👁</span></div>
+<label>STT 模型</label>
+<input id="cfg-stt-model" placeholder="whisper-1"/>
+<label>语言（可选，如 zh / en，留空=自动识别）</label>
+<input id="cfg-stt-lang" placeholder="zh"/>
+<div class="tip">语音转写走 OpenAI 兼容接口 <code>/audio/transcriptions</code>。注意：DeepSeek 等多数对话模型<b>不支持</b>语音转写，需单独填写支持的服务（如 OpenAI 或本地 Whisper）。</div>
+<div id="msg"></div>
+<div class="btns"><button class="save" onclick="saveCfg()">保存</button><button class="cancel" onclick="window.close()">取消</button></div>
+</div>
+<script>
+function $(id){return document.getElementById(id)}
+async function loadCfg(){
+  try{
+    const ac=new AbortController();const tm=setTimeout(()=>ac.abort(),5000);
+    const r=await fetch('/load-ai-cfg',{signal:ac.signal});
+    clearTimeout(tm);
+    if(r.ok){
+      const d=await r.json();
+      $('cfg-stt-base').value=d.base||'';
+      $('cfg-stt-key').value=d.key||'';
+      $('cfg-stt-model').value=d.model||'';
+      $('cfg-stt-lang').value=d.language||'';
+    }
+  }catch(e){/* 超时或加载失败，保持默认值 */}
+}
+async function saveCfg(){
+  const sttBase=$('cfg-stt-base').value.trim();
+  const sttKey=$('cfg-stt-key').value.trim();
+  const sttModel=$('cfg-stt-model').value.trim();
+  const sttLang=$('cfg-stt-lang').value.trim();
+  const stt={};
+  if(sttBase)stt.base=sttBase;
+  if(sttKey)stt.key=sttKey;
+  if(sttModel)stt.model=sttModel;
+  if(sttLang)stt.language=sttLang;
+  try{
+    // STT 配置独立存储于 .stt-cfg.json，与 ai-cfg 互不干扰
+    await fetch('/save-stt-cfg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(stt)});
+    $('msg').textContent='✅ 配置已保存';
+    $('msg').style.color='#27ae60';
+    setTimeout(()=>window.close(),800);
+  }catch(e){
+    $('msg').textContent='❌ 保存失败，请重试';
+  }
+}
+function toggleSttKey(){
+  const inp=$('cfg-stt-key');
+  if(inp.type==='password'){inp.type='text';}else{inp.type='password';}
+}
+loadCfg();
+</script>
+</body>
+</html>

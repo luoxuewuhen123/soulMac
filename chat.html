@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>与茵茵聊天</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#f9f9fb;font:13px/1.5 'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif;display:flex;flex-direction:column}
+#hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,#ff9ec4,#ff6b9d);color:#fff;font-weight:bold;font-size:14px;flex-shrink:0;-webkit-app-region:drag}
+#hdr .btn{display:inline-block;cursor:pointer;font-size:15px;opacity:.8;padding:0 6px;-webkit-app-region:no-drag}
+#hdr .btn:hover{opacity:1}
+
+
+#msgs{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+#msgs .msg{max-width:85%;padding:6px 12px;border-radius:12px;word-break:break-word;line-height:1.5;animation:fadeIn .2s ease}
+#msgs .msg .time{display:block;font-size:10px;opacity:.5;margin-top:3px}
+#msgs .msg.me{align-self:flex-end;background:#ff6b9d;color:#fff;border-radius:12px 12px 4px 12px}
+#msgs .msg.me .time{text-align:right;color:#fff}
+#msgs .msg.ai{align-self:flex-start;background:#fff;color:#333;border:1px solid #eee;border-radius:12px 12px 12px 4px}
+#msgs .msg.tool{align-self:flex-start;background:#f0f4ff;color:#667799;font-size:11px;padding:4px 10px;border-radius:8px;margin:0;border:none;animation:fadeIn .15s ease}
+#msgs .msg.tool.ok{background:#f0fff4;color:#559966}
+#msgs .msg.tool.err{background:#fff0f0;color:#996666}
+#msgs .msg.thinking{align-self:flex-start;background:#faf7ff;color:#8a7fb0;font-size:11px;padding:4px 10px;border-radius:8px;margin:0;border:none;max-width:85%;animation:fadeIn .15s ease}
+#msgs .msg.thinking summary{cursor:pointer;user-select:none;color:#a99fd0;font-size:11px;outline:none}
+#msgs .msg.thinking .think-body{margin-top:4px;white-space:pre-wrap;color:#9a8fc0;font-size:11px;line-height:1.5;max-height:220px;overflow-y:auto}
+#msgs .loading span{animation:dot 1.4s infinite;display:inline-block;font-size:18px;line-height:1}
+#msgs .loading span:nth-child(2){animation-delay:.2s}
+#msgs .loading span:nth-child(3){animation-delay:.4s}
+#load-more-wrap{text-align:center;padding:6px 0;flex-shrink:0}
+#load-more-wrap .lm-btn{color:#ff6b9d;font-size:12px;cursor:pointer;padding:4px 12px;border:1px dashed #ff6b9d;border-radius:12px;display:inline-block;transition:.2s;user-select:none}
+#load-more-wrap .lm-btn:hover{background:#fff0f5}
+#load-more-wrap .lm-btn.loading{opacity:.6;cursor:default;pointer-events:none}
+@keyframes fadeIn{0%{opacity:0}100%{opacity:1}}
+@keyframes dot{0%,20%{opacity:0}50%{opacity:1}80%,100%{opacity:0}}
+#inp-wrap{display:flex;align-items:center;border-top:1px solid #eee;padding:8px;background:#fff;flex-shrink:0}
+#inp-wrap input{flex:1;border:1px solid #ddd;border-radius:20px;padding:7px 12px;outline:none;font-size:13px}
+#inp-wrap input:focus{border-color:#ff6b9d}
+#inp-wrap button{margin-left:6px;border:none;background:#ff6b9d;color:#fff;border-radius:20px;padding:7px 14px;cursor:pointer;font-size:13px}
+#inp-wrap button:hover{background:#ff528a}
+#inp-wrap button:disabled{opacity:.5;cursor:not-allowed}
+#inp-wrap button.cancel{background:#e74c3c}
+#mic-btn{flex-shrink:0;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:50%;font-size:18px;margin-right:6px;transition:.2s;user-select:none;background:transparent}
+#mic-btn:hover{background:#f0f0f0}
+#mic-btn.active{background:#ff6b9d;color:#fff;animation:micPulse 1s ease-in-out infinite}
+@keyframes micPulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.15);opacity:.7}}
+@keyframes tsSpin{to{transform:rotate(360deg)}}
+.ts-ico{display:inline-block;width:14px;height:14px;margin-right:4px;font-size:12px;line-height:14px;text-align:center;flex-shrink:0}
+.ts-spin{border:2px solid #ddd;border-top-color:#ff6b9d;border-radius:50%;animation:tsSpin .6s linear infinite;vertical-align:middle}
+.msg.tool{display:flex;align-items:center;gap:2px}
+#msgs .msg.tool .read-summary{display:block;padding:4px 10px;line-height:1.6}
+#msgs .msg.tool .read-summary summary{cursor:pointer;user-select:none;color:#559966;font-size:11px;outline:none}
+#msgs .msg.tool .read-summary ul{margin:4px 0 0;padding-left:18px;list-style:disc}
+#msgs .msg.tool .read-summary li{color:#667799;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+</style></head>
+<body>
+<div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>💬 与茵茵聊天</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
+
+<div id="msgs"><div id="load-more-wrap"></div></div>
+<div id="inp-wrap"><span id="mic-btn">🎤</span><input id="chat-input" placeholder="输入消息..." onkeydown="if(event.key==='Enter')sendMsg()"/><button id="send-btn" onclick="sendMsg()">发送</button></div>
+
+<script>
+const PAGE_SIZE=50;
+let chatCfg={msgs:[]};
+let aiCfg={};
+let pendingReply=null;
+let _cancelLatch=false; // 中断后防显示回复
+let archiveMsgs=null;
+let archiveLoaded=false;
+let archiveIndex=0;        // 已从 archiveMsgs 尾部加载的条数
+let displayStart=0;        // 当前显示的第一条在 chatCfg.msgs 中的索引
+
+// ===== 语音输入（本地录音 + 可配置 STT，不依赖浏览器内置 SpeechRecognition） =====
+// 浏览器内置 SpeechRecognition 依赖 Google 云端服务，在 Electron 及国内网络下不可用，
+// 故改用 MediaRecorder 本地录音，再把音频发给用户配置的 STT 服务（OpenAI 兼容 /audio/transcriptions）。
+let mediaRecorder=null;
+let mediaStream=null;
+let voiceChunks=[];
+let voiceRecording=false;
+let voiceTranscribing=false;
+let sttCfg={};               // 独立的语音输入(STT)配置，来自 .stt-cfg.json
+let voiceBusy=false; // 防止 getUserMedia 等待期间重复点击触发并发录音
+
+function pickVoiceMime(){
+  const cands=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
+  if(!window.MediaRecorder) return '';
+  for(const c of cands){ if(MediaRecorder.isTypeSupported(c)) return c; }
+  return '';
+}
+function setMicState(on){
+  const micBtn=document.getElementById('mic-btn');
+  if(micBtn) micBtn.classList.toggle('active', on);
+}
+function toggleVoice(){
+  if(voiceBusy)return;
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    addMsg('ai','当前环境不支持录音（getUserMedia 不可用）');
+    return;
+  }
+  if(voiceRecording) stopVoice();
+  else startVoice();
+}
+async function startVoice(){
+  voiceBusy=true;
+  try{
+    mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
+  }catch(e){
+    voiceBusy=false;
+    addMsg('ai','无法访问麦克风：'+(e && e.message ? e.message : e)+'（请检查系统/应用麦克风权限）');
+    return;
+  }
+  voiceChunks=[];
+  const mime=pickVoiceMime();
+  try{
+    mediaRecorder=new MediaRecorder(mediaStream, mime?{mimeType:mime}:undefined);
+  }catch(e){
+    addMsg('ai','录音初始化失败：'+(e && e.message ? e.message : e));
+    stopMicTracks();
+    return;
+  }
+  mediaRecorder.ondataavailable=ev=>{ if(ev.data && ev.data.size>0) voiceChunks.push(ev.data); };
+  mediaRecorder.onstop=onVoiceStop;
+  mediaRecorder.start();
+  voiceBusy=false;
+  voiceRecording=true;
+  setMicState(true);
+  const inp=document.getElementById('chat-input');
+  if(inp){ inp.dataset.voiceHint='1'; inp.placeholder='🎤 正在聆听…（再次点击结束）'; }
+}
+function stopMicTracks(){
+  if(mediaStream){ mediaStream.getTracks().forEach(t=>{try{t.stop()}catch(_){}}); mediaStream=null; }
+}
+function stopVoice(){
+  voiceRecording=false;
+  setMicState(false);
+  const inp=document.getElementById('chat-input');
+  if(inp){ delete inp.dataset.voiceHint; inp.placeholder='输入消息...'; }
+  if(mediaRecorder && mediaRecorder.state!=='inactive'){ try{ mediaRecorder.stop(); }catch(_){} }
+}
+async function onVoiceStop(){
+  const blob=new Blob(voiceChunks, {type:(mediaRecorder && mediaRecorder.mimeType)||'audio/webm'});
+  voiceChunks=[];
+  stopMicTracks();
+  mediaRecorder=null;
+  await transcribeVoice(blob);
+}
+async function transcribeVoice(blob){
+  const stt=sttCfg || {};
+  const base=(stt.base || (aiCfg && aiCfg.url) || '').replace(/\/+$/,'');
+  const key=stt.key || (aiCfg && aiCfg.apiKey) || '';
+  const model=stt.model || 'whisper-1';
+  if(!base || !key){
+    addMsg('ai','未配置语音识别(STT)服务：请在“配置”中填写 STT 地址与 Key（对话模型如 DeepSeek 不支持语音转写，需单独配置，例如 OpenAI / 本地 Whisper）');
+    return;
+  }
+  if(voiceTranscribing) return;
+  voiceTranscribing=true;
+  const inp=document.getElementById('chat-input');
+  if(inp) inp.placeholder='🔄 识别中…';
+  try{
+    const fd=new FormData();
+    const ext=(blob.type.indexOf('ogg')>=0)?'ogg':(blob.type.indexOf('mp4')>=0)?'mp4':'webm';
+    fd.append('file', blob, 'voice.'+ext);
+    fd.append('model', model);
+    if(stt.language) fd.append('language', stt.language);
+    const r=await fetch(base+'/audio/transcriptions', {
+      method:'POST',
+      headers:{ 'Authorization':'Bearer '+key },
+      body: fd
+    });
+    if(!r.ok){
+      let detail='';
+      try{ detail=(await r.text()).slice(0,200); }catch(_){}
+      addMsg('ai','语音识别失败('+r.status+')：'+detail);
+      return;
+    }
+    const d=await r.json();
+    const text=(d.text || '').trim();
+    const el=document.getElementById('chat-input');
+    if(text){
+      if(el){ el.value=text; el.focus(); }
+    }else{
+      addMsg('ai','未识别到内容，请重试');
+    }
+  }catch(e){
+    addMsg('ai','语音识别请求失败：'+(e && e.message ? e.message : e));
+  }finally{
+    voiceTranscribing=false;
+    const el=document.getElementById('chat-input');
+    if(el && !el.dataset.voiceHint) el.placeholder='输入消息...';
+  }
+}
+
+async function loadData(){
+  try{const r=await fetch('/load-chat-cfg');if(r.ok)chatCfg=await r.json();}catch(e){}
+  try{const r=await fetch('/load-ai-cfg');if(r.ok)aiCfg=await r.json();}catch(e){}
+  try{const r=await fetch('/load-stt-cfg');if(r.ok)sttCfg=await r.json();}catch(e){}
+  if(!aiCfg.url)aiCfg.url='https://api.deepseek.com/v1';if(!aiCfg.model)aiCfg.model='deepseek-v4-flash';
+  if(!chatCfg.msgs)chatCfg.msgs=[];
+  // 默认只显示最近50条
+  renderInitial();
+  // 检查是否有存档
+  try{
+    const r=await fetch('/load-chat-archive');
+    if(r.ok){
+      const data=await r.json();
+      if(Array.isArray(data)&&data.length>0){
+        archiveMsgs=data;
+        archiveIndex=0;
+      }
+    }
+  }catch(e){}
+  updateLoadMore();
+  // AI正在处理时，锁定输入并显示中断按钮
+  if(await window.api?.isAiBusy()){
+    const inp=$('chat-input');
+    const btn=$('send-btn');
+    btn.textContent='⏹';
+    btn.onclick=cancelAi;
+    btn.disabled=false;
+    pendingReply={text:'',div:null, inp, btn};
+    const loadDiv=document.createElement('div');
+    loadDiv.className='msg ai loading';
+    loadDiv.innerHTML='正在输入<span>.</span><span>.</span><span>.</span>';
+    $('msgs').appendChild(loadDiv);
+    $('msgs').scrollTop=$('msgs').scrollHeight;
+    pendingReply.div=loadDiv;
+  }
+  $('msgs').addEventListener('scroll',updateLoadMore);
+}
+
+function renderInitial(){
+  const msgs=chatCfg.msgs||[];
+  if(msgs.length===0){addMsg('ai','你好呀~ 有什么想聊的吗？');displayStart=0;return;}
+  displayStart=Math.max(0,msgs.length-PAGE_SIZE);
+  for(let i=displayStart;i<msgs.length;i++){const m=msgs[i];addMsg(m.role,m.content,m.time);}
+}
+
+
+function updateLoadMore(){
+  const wrap=$('load-more-wrap');
+  if(!wrap)return;
+  const hasMoreMsgs=displayStart>0;
+  const hasMoreArchive=archiveMsgs&&!archiveLoaded;
+  if(!hasMoreMsgs&&!hasMoreArchive){wrap.innerHTML='<span style="color:#999;font-size:11px">— 已加载全部历史消息 —</span>';return;}
+  const msgsEl=$('msgs');
+  if(msgsEl.scrollTop<=20){wrap.innerHTML='<span class="lm-btn" onclick="loadMore()">↑ 加载更多历史消息</span>';}
+  else{wrap.innerHTML='';}
+}
+
+async function loadMore(){
+  const btn=$('load-more-wrap')?.querySelector('.lm-btn');
+  if(btn)btn.classList.add('loading');
+  const msgsEl=$('msgs');
+  const prevScrollTop=msgsEl.scrollTop;
+  const prevScrollHeight=msgsEl.scrollHeight;
+  const firstMsg=msgsEl.querySelector('.msg');
+  // 先从当前聊天记录加载
+  if(displayStart>0){
+    const newStart=Math.max(0,displayStart-PAGE_SIZE);
+    for(let i=displayStart-1;i>=newStart;i--){
+      const m=(chatCfg.msgs||[])[i];if(!m)continue;
+      const div=document.createElement('div');
+      div.className='msg '+(m.role==='user'?'me':'ai');
+      div.textContent=m.content;
+      const t=document.createElement('span');t.className='time';t.textContent=m.time||'';
+      div.appendChild(t);
+      if(firstMsg)msgsEl.insertBefore(div,firstMsg);else msgsEl.appendChild(div);
+    }
+    displayStart=newStart;
+  }
+  // 当前聊天记录已显示完，加载存档
+  else if(archiveMsgs&&!archiveLoaded){
+    const end=archiveMsgs.length-archiveIndex;
+    const start=Math.max(0,end-PAGE_SIZE);
+    const batch=archiveMsgs.slice(start,end);
+    archiveIndex+=batch.length;
+    if(archiveIndex>=archiveMsgs.length)archiveLoaded=true;
+    for(let i=batch.length-1;i>=0;i--){
+      const m=batch[i];
+      const div=document.createElement('div');
+      div.className='msg '+(m.role==='user'?'me':'ai');
+      div.textContent=m.content;
+      const t=document.createElement('span');t.className='time';t.textContent=m.time||'';
+      div.appendChild(t);
+      if(firstMsg)msgsEl.insertBefore(div,firstMsg);else msgsEl.appendChild(div);
+    }
+  }
+  msgsEl.scrollTop=msgsEl.scrollHeight-prevScrollHeight+prevScrollTop;
+  updateLoadMore();
+  if(btn)btn.classList.remove('loading');
+}
+
+function getTime(){ return window.api?.getTime ? window.api.getTime() : (()=>{const d=new Date();return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');})(); }
+
+function addMsg(role,text,time){
+  const d=$('msgs');
+  if(!d)return;
+  const div=document.createElement('div');
+  div.className='msg '+(role==='user'?'me':'ai');
+  div.textContent=text;
+  const t=document.createElement('span');
+  t.className='time';
+  t.textContent=time||getTime();
+  div.appendChild(t);
+  d.appendChild(div);
+  d.scrollTop=d.scrollHeight;
+}
+
+function resetSendBtn(){
+  const btn=$('send-btn');
+  btn.textContent='发送';
+  btn.onclick=sendMsg;
+  btn.disabled=false;
+}
+async function sendMsg(){
+  if(pendingReply)return; // 已有请求正在处理，防止重复发送
+  if(await window.api?.isAiBusy()){
+    // AI 忙碌中→显示"正在输入"并改为中断按钮，不发送新消息
+    const inp=$('chat-input');
+    const btn=$('send-btn');
+    const loadDiv=document.createElement('div');
+    loadDiv.className='msg ai loading';
+    loadDiv.innerHTML='正在输入<span>.</span><span>.</span><span>.</span>';
+    $('msgs').appendChild(loadDiv);
+    $('msgs').scrollTop=$('msgs').scrollHeight;
+    btn.textContent='⏹';
+    btn.onclick=cancelAi;
+    btn.disabled=false;
+    pendingReply={text:'',div:loadDiv,inp,btn};
+    return;
+  }
+  if(!aiCfg.apiKey){addMsg('ai','请先在配置页面设置 API Key');return}
+  const inp=$('chat-input');
+  const btn=$('send-btn');
+  const txt=inp.value.trim();
+  if(!txt)return;
+  inp.value='';
+  btn.disabled=true;
+  addMsg('user',txt);
+  chatCfg.msgs.push({role:'user',content:txt,time:getTime()});
+  // loading
+  const loadDiv=document.createElement('div');
+  loadDiv.className='msg ai loading';
+  loadDiv.innerHTML='正在输入<span>.</span><span>.</span><span>.</span>';
+  $('msgs').appendChild(loadDiv);
+  $('msgs').scrollTop=$('msgs').scrollHeight;
+  // 改为取消按钮，可中断AI返回
+  btn.textContent='⏹';
+  btn.onclick=cancelAi;
+  btn.disabled=false;
+  // 由宠物窗口调 AI，窗口关闭也不影响
+  pendingReply={text:'',div:loadDiv,inp,btn};
+  window.api?.sendToPetWindow({type:'user-msg',userText:txt});
+}
+function cancelAi(){
+  if(!pendingReply)return;
+  _cancelLatch=true;
+  window.api?.sendToPetWindow({type:'cancel-ai'});
+  // 立即清除 UI（回复即使已到达也被丢弃）
+  $('msgs').removeChild(pendingReply.div);
+  resetSendBtn();
+  if(pendingReply.inp)pendingReply.inp.disabled=false;
+  pendingReply=null;
+}
+
+
+function $(id){return document.getElementById(id)}
+
+// 接收宠物窗口发送的消息
+function _resolvePending(text){
+  // 已中断—丢弃回复，仅恢复输入状态
+  if(_cancelLatch){_cancelLatch=false;if(pendingReply?.inp)pendingReply.inp.disabled=false;resetSendBtn();pendingReply=null;return;}
+  if(!pendingReply){addMsg('ai',text);return;} // 没有pending时直接追加
+  pendingReply.div.textContent=text;
+  const timeSpan=document.createElement('span');
+  timeSpan.className='time';
+  timeSpan.textContent=getTime();
+  pendingReply.div.appendChild(timeSpan);
+  pendingReply.div.classList.remove('loading');
+  $('msgs').scrollTop=$('msgs').scrollHeight;
+  if(pendingReply.inp)pendingReply.inp.disabled=false;
+  resetSendBtn();
+  pendingReply=null;
+}
+window.api?.onFromPetWindow(data=>{
+  if(data.type==='user-voice'){
+    addMsg('user',data.text);
+    const loadDiv=document.createElement('div');
+    loadDiv.className='msg ai loading';
+    loadDiv.innerHTML='正在输入<span>.</span><span>.</span><span>.</span>';
+    $('msgs').appendChild(loadDiv);
+    $('msgs').scrollTop=$('msgs').scrollHeight;
+    // 改为取消按钮
+    const btn=$('send-btn');
+    btn.textContent='⏹';
+    btn.onclick=cancelAi;
+    btn.disabled=false;
+    pendingReply={text:'',div:loadDiv, inp:$('chat-input'), btn};
+  }
+  if(data.type==='chat-reply'||data.type==='show-reply'){
+    _resolvePending(data.text);
+  }
+  if(data.type==='tool-status'){
+    // 有 id 时复用已有行，否则创建新行
+    let div=null;
+    if(data.id){div=$('msgs').querySelector('[data-tid="'+data.id+'"]');}
+    if(!div){
+      div=document.createElement('div');
+      div.className='msg tool';
+      if(data.id)div.setAttribute('data-tid',data.id);
+      if(pendingReply&&pendingReply.div){
+        $('msgs').insertBefore(div,pendingReply.div);
+      }else{
+        $('msgs').appendChild(div);
+      }
+    }
+    // 读取汇总：可折叠展示读取了哪些文件、哪些行
+    if(data.reads){
+      const d=document.createElement('details');
+      d.className='read-summary';
+      const sum=document.createElement('summary');
+      sum.textContent=data.text+'（点击展开）';
+      d.appendChild(sum);
+      const ul=document.createElement('ul');
+      data.reads.forEach(r=>{
+        const li=document.createElement('li');
+        li.textContent=r.path+(r.lines?(' — '+r.lines):'');
+        ul.appendChild(li);
+      });
+      d.appendChild(ul);
+      div.innerHTML='';
+      div.appendChild(d);
+      div.className='msg tool ok';
+      $('msgs').scrollTop=$('msgs').scrollHeight;
+      return;
+    }
+    // 更新内容和状态
+    div.className='msg tool'+(data.ok?' ok':data.err?' err':'');
+    if(data.ok||data.err){
+      const txt=data.text.replace(/^[✓✗]\s*/,'');
+      div.innerHTML='<span class="ts-ico">'+(data.ok?'✅':'❌')+'</span><span>'+txt+'</span>';
+    }else{
+      const txt=data.text.replace(/\.\.\.$/,'');
+      div.innerHTML='<span class="ts-ico ts-spin"></span><span>'+txt+'</span>';
+    }
+    $('msgs').scrollTop=$('msgs').scrollHeight;
+  }
+  if(data.type==='ai-thinking'){
+    const div=document.createElement('div');
+    div.className='msg thinking';
+    const details=document.createElement('details');
+    const summary=document.createElement('summary');
+    summary.textContent='💭 茵茵的思考过程（点击展开）';
+    const body=document.createElement('div');
+    body.className='think-body';
+    body.textContent=data.text;
+    details.appendChild(summary);
+    details.appendChild(body);
+    div.appendChild(details);
+    // 有等待回复的 loading 气泡时，插到它前面，保持时间线顺序
+    if(pendingReply&&pendingReply.div){
+      $('msgs').insertBefore(div,pendingReply.div);
+    }else{
+      $('msgs').appendChild(div);
+    }
+    $('msgs').scrollTop=$('msgs').scrollHeight;
+  }
+  if(data.type==='ask-question'){
+    // 显示问题
+    const qDiv=document.createElement('div');
+    qDiv.className='msg ai';
+    qDiv.textContent='❓ '+data.question;
+    $('msgs').appendChild(qDiv);
+    // 输入框 + 提交按钮
+    const wrap=document.createElement('div');
+    wrap.style.cssText='display:flex;gap:6px;padding:6px 12px;border-top:1px solid #eee;flex-shrink:0;background:#fff';
+    const inp=document.createElement('input');
+    inp.placeholder='输入回答...';
+    inp.style.cssText='flex:1;border:1px solid #ddd;border-radius:20px;padding:7px 12px;outline:none;font-size:13px';
+    const btn=document.createElement('button');
+    btn.textContent='回答';
+    btn.style.cssText='border:none;background:#ff6b9d;color:#fff;border-radius:20px;padding:7px 14px;cursor:pointer;font-size:13px';
+    wrap.appendChild(inp);wrap.appendChild(btn);
+    $('msgs').appendChild(wrap);
+    $('msgs').scrollTop=$('msgs').scrollHeight;
+    inp.focus();
+    const submit=()=>{
+      const answer=inp.value.trim();
+      if(!answer)return;
+      wrap.remove();qDiv.textContent='❓ '+data.question+'\n💬 '+answer;
+      window.api?.sendToPetWindow({type:'user-answer',id:data.id,answer});
+      // 恢复聊天输入框
+      if($('chat-input'))$('chat-input').disabled=false;
+      if($('send-btn')){$('send-btn').disabled=false;$('send-btn').textContent='发送';$('send-btn').onclick=sendMsg;}
+    };
+    btn.onclick=submit;
+    inp.onkeydown=e=>{if(e.key==='Enter')submit();};
+    // 禁用聊天输入框
+    if($('chat-input'))$('chat-input').disabled=true;
+    if($('send-btn'))$('send-btn').disabled=true;
+  }
+
+});
+
+// 聊天窗口关闭时，通知宠物窗口停止当前 AI 处理
+window.addEventListener('beforeunload',()=>{
+  if(pendingReply)window.api?.sendToPetWindow({type:'cancel-ai'});
+  pendingReply=null;
+});
+window.api?.onAiCfgWindowClosed(async()=>{
+  try{const r=await fetch('/load-ai-cfg');if(r.ok)aiCfg=await r.json()}catch(e){}
+});
+window.api?.onSttCfgWindowClosed(async()=>{
+  try{const r=await fetch('/load-stt-cfg');if(r.ok)sttCfg=await r.json()}catch(e){}
+});
+document.getElementById('mic-btn').addEventListener('click',toggleVoice);
+loadData();
+</script>
+</body>
+</html>

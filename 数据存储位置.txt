@@ -1,0 +1,9 @@
+位置 %APPDATA%\soul\data文件夹。需要重新配置只需删除文件或清空内容即可。
+
+AI 模型配置	.ai-cfg.json
+聊天记录    	.chat-cfg.json	
+聊天存档    	.chat-archive.json (被摘要的原聊天内容)
+聊天摘要    	.experiences.json  
+宠物装饰    	.deco.json
+语音开关状态	.voice.json
+技能配置    	.skills.json（在技能管理页面添加/卸载，也可手动编辑）

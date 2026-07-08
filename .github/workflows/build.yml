@@ -1,0 +1,74 @@
+name: 构建安装包
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: '目标平台'
+        required: true
+        default: 'macos'
+        type: choice
+        options:
+          - macos
+          - windows
+          - linux
+          - all
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'all') && fromJSON('[
+          {"os":"macos-latest", "script":"dist:mac", "ext":"dmg", "name":"macOS"},
+          {"os":"windows-latest", "script":"dist:win", "ext":"exe", "name":"Windows"},
+          {"os":"ubuntu-latest", "script":"dist:linux", "ext":"AppImage", "name":"Linux"}
+        ]') || (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'windows') && fromJSON('[
+          {"os":"windows-latest", "script":"dist:win", "ext":"exe", "name":"Windows"}
+        ]') || (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'linux') && fromJSON('[
+          {"os":"ubuntu-latest", "script":"dist:linux", "ext":"AppImage", "name":"Linux"}
+        ]') || fromJSON('[
+          {"os":"macos-latest", "script":"dist:mac", "ext":"dmg", "name":"macOS"}
+        ]') }}
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 缓存 node_modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - run: npm ci
+
+      - name: 构建 ${{ matrix.name }} 安装包
+        run: npm run ${{ matrix.script }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 茵茵-桌面宠物_${{ matrix.name }}
+          path: dist/*.${{ matrix.ext }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: 茵茵-桌面宠物_*/*
+          generate_release_notes: true

@@ -1,0 +1,85 @@
+{
+  "name": "soul",
+  "version": "1.0.0",
+  "description": "桌面伴侣",
+  "author": "sigan",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack:win": "electron-builder --win portable",
+    "pack:mac": "electron-builder --mac dir",
+    "pack:linux": "electron-builder --linux dir",
+    "dist:win": "electron-builder --win nsis",
+    "dist:mac": "electron-builder --mac dmg",
+    "dist:linux": "electron-builder --linux appimage",
+    "dist:all": "electron-builder --win nsis --mac dmg --linux appimage"
+  },
+  "build": {
+    "appId": "com.soul.pet",
+    "productName": "茵茵-桌面宠物",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico",
+      "legalTrademarks": "sigan"
+    },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "icon": "icon.icns",
+      "category": "public.app-category.lifestyle",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "icon.png",
+      "category": "Utility"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "茵茵-桌面宠物",
+      "unicode": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerHeaderIcon": "icon.ico",
+      "license": "LICENSE.txt",
+      "include": "installer.nsh"
+    },
+    "artifactName": "${productName}_${version}_${os}-${arch}.${ext}",
+    "asar": true,
+    "asarUnpack": [
+      "tts-worker.js",
+      "node_modules/edge-tts-universal/**"
+    ],
+    "npmRebuild": false,
+    "files": [
+      "**/*",
+      "!node_modules/electron/**",
+      "!node_modules/electron-builder/**",
+      "!dist/**",
+      "!启动宠物.bat",
+      "!data/",
+      "!茵茵的小家/"
+    ]
+  },
+  "dependencies": {
+    "edge-tts-universal": "^1.4.0",
+    "koffi": "^3.1.0",
+    "oh-my-live2d": "^0.19.3",
+    "pixi-live2d-display": "^0.4.0",
+    "pixi.js": "^6.5.10"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3"
+  }
+}
