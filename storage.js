@@ -33,7 +33,6 @@ const defaults = {
   voice:         '{"enabled":false}',
 
   'ai-cfg':      '{}',
-  'stt-cfg':     '{}',
   experiences:   '[]',
   skills:        '{}',
   tools:         '{"disabled":[]}',

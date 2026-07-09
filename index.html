@@ -40,19 +40,6 @@ const store={
 };
 let model=null;
 // 注入项目信息 + 路径限制（三个场景共用）
-async function injectProjectInfo(arr){
-  const pushed=[];
-  try{
-    let text='';
-    const[pR,iR]=await Promise.all([fetch('/project-root'),fetch('/project-index')]);
-    if(pR.ok){text+='当前的项目地址是'+(await pR.text())+'\n\n';}
-    if(iR.ok){const idx=await iR.json();const lines=idx.slice(0,300).map(f=>'  '+f.path+' ('+f.lines+'行)');text+='=== 项目文件索引（共'+idx.length+'个文件）===\n'+lines.join('\n')+(idx.length>300?'\n  ...(仅显示前300个)':'');}
-    if(text)pushed.push({role:'system',content:text});
-  }catch(e){}
-
-  arr.push(...pushed);
-  return pushed;
-}
 // 注入用户自定义指令（已启用的，放在项目信息之后）
 async function injectInstructions(arr){
   try{
@@ -532,9 +519,6 @@ window.api?.onMenu((a,v)=>{
     case 'config':
       window.api?.openAiCfgWindow();
       break;
-    case 'stt-config':
-      window.api?.openSttCfgWindow();
-      break;
     case 'pin':
       pinned=!pinned;
       window.api?.togglePin();
@@ -673,7 +657,7 @@ function makeTools(){
   {type:'function',function:{name:'search',description:'搜索代码：keyword 子串、definition 定义、reference 引用、regex 正则',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词（regex 模式时为正则）'},mode:{type:'string',enum:['keyword','definition','reference','regex'],description:'搜索模式，默认 keyword'},context:{type:'number',description:'上下文行数，默认2'},caseSensitive:{type:'boolean',description:'是否区分大小写，默认 false'}},required:['q'],additionalProperties:false}}},
   {type:'function',function:{name:'lint_file',description:'检查文件语法错误',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'tree',description:'递归显示目录树（一步看清项目结构）, maxDepth 默认3 最大6',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径，默认当前目录'},maxDepth:{type:'number',description:'最大递归深度，默认3，最大6'},ignore:{type:'array',description:'忽略的目录/文件列表',items:{type:'string'}}},required:[],additionalProperties:false}}},
-  {type:'function',function:{name:'bash',description:'执行 shell 命令并返回输出（最多5000字）',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的命令'}},required:['command'],additionalProperties:false}}},
+  {type:'function',function:{name:'bash',description:'执行 shell 命令并返回输出（最多5000字）。路径含中文/emoji 时优先用 read_files 等专用工具；若必须用 bash，请在命令前加 "powershell " 前缀（如 powershell Get-Content "中文路径"）',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的命令'}},required:['command'],additionalProperties:false}}},
   {type:'function',function:{name:'read_image',description:'读取图片，让 AI 识别内容（png/jpg/gif/webp/bmp）',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'图片路径'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'read_document',description:'读取 PDF 或 Word(.docx) 文档的文字内容',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文档路径'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'web_fetch',description:'抓取网页文字，获取文档/资料信息',strict:true,parameters:{type:'object',properties:{url:{type:'string',description:'完整 URL（含 https://）'}},required:['url'],additionalProperties:false}}},
@@ -703,22 +687,6 @@ async function getMcpTools(){
     if(!_cachedMcpTools)_cachedMcpTools=[];
   }
   return _cachedMcpTools;
-}
-// 压缩较早的超长工具结果：仅保留最近一轮完整，更早的超长结果压缩为首行摘要，防止上下文无限膨胀
-function compactToolResults(msgs, keepLastN){
-  const threshold=2000;
-  const toolIdx=[];
-  msgs.forEach((m,i)=>{if(m.role==='tool')toolIdx.push(i);});
-  const keepFrom=Math.max(0,toolIdx.length-keepLastN);
-  toolIdx.forEach((idx,ti)=>{
-    if(ti<keepFrom){
-      const m=msgs[idx];
-      if(m.content&&m.content.length>threshold){
-        const first=m.content.split('\n')[0].substring(0,200);
-        msgs[idx]={role:'tool',tool_call_id:m.tool_call_id,content:first+' (工具结果已压缩，仅保留摘要)'};
-      }
-    }
-  });
 }
 // ===== 完整的对话式工具循环（含消息重建 + 聊天窗口 UI 通知） =====
 // 与 handleChatMsg 的循环完全一致，供三个场景通用
@@ -922,8 +890,7 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
       }
       const results=await Promise.all(execTcs.map(tc=>execTC(tc).then(r=>({tc,result:r}))));
       for(const{tc,result}of results){const tMsg={role:'tool',tool_call_id:tc.id,content:result||'none'};messages.push(tMsg);sessionMsgs.push(tMsg);}
-      // 压缩较早的超长工具结果，仅保留当前轮完整，防止上下文无限膨胀
-      compactToolResults(sessionMsgs, results.length);
+
     }
   }
   return {finalReply,didMutate,sessionMsgs};
@@ -968,7 +935,7 @@ async function buildAiContext(scenario) {
   const timeHintMsg = { role: 'system', content: timeHint };
   msgs.push(timeHintMsg);
   // 思考指引放在时间提示后面（在所有固定信息的最后）
-  const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先想想：要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先列计划再执行：在回复中列出完整计划并一次性并行调用所有能获取信息的工具，拿到结果后一次性完成所有操作，减少来回对话轮次，不确定的时候可以问主人，注意：优先使用专用工具而非 Bash 命令。' };
+  const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先思考要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先思考出完整的计划再执行：执行时尽量并行操作，减少执行次数。注意：优先使用专用工具而非 Bash 命令。' };
   msgs.push(thinkGuideMsg);
   await ensureToolsCfg();
   const tools = makeTools();
@@ -1002,8 +969,8 @@ async function truncateMsgs(){
     const totalTokens=estMsgsTokens(allMsgs);
     if(totalTokens<=limit)return;
 
-    // 超出 limit，取前 70% 的消息进行摘要，留 30%
-    const cutCount=Math.max(Math.ceil(msgs.length*0.7),1);
+    // 超出 limit，取前 80% 的消息进行摘要，留 20%
+    const cutCount=Math.max(Math.ceil(msgs.length*0.8),1);
     const dropped=msgs.slice(0,cutCount);
     const kept=msgs.slice(cutCount);
     if(dropped.length<1)return;
@@ -1218,9 +1185,7 @@ window.api?.onFromChatWindow(data=>{
 window.api?.onAiCfgWindowClosed(async()=>{
   await loadAllConfigs();
 });
-window.api?.onSttCfgWindowClosed(async()=>{
-  await loadAllConfigs();
-});
+
 
 
 function getTime(){ return window.api?.getTime ? window.api.getTime() : (()=>{const d=new Date();return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');})(); }

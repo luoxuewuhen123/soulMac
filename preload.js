@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   onMenu: cb => ipcRenderer.on('menu', (_, a, v) => cb(a, v)),
   openChatWindow: () => ipcRenderer.send('open-chat-window'),
   openAiCfgWindow: () => ipcRenderer.send('open-ai-cfg-window'),
-  openSttCfgWindow: () => ipcRenderer.send('open-stt-cfg-window'),
+
   openSkillsWindow: () => ipcRenderer.send('open-skills-window'),
   openToolsWindow: () => ipcRenderer.send('open-tools-window'),
   openInstructionsWindow: () => ipcRenderer.send('open-instructions-window'),
@@ -18,7 +18,7 @@ contextBridge.exposeInMainWorld('api', {
   onAiAbort: cb => { const f = () => cb(); ipcRenderer.on('ai-abort', f); return () => ipcRenderer.removeListener('ai-abort', f); },
   sendToChatWindow: data => ipcRenderer.send('pet-to-chat', data),
   onAiCfgWindowClosed: cb => ipcRenderer.on('ai-cfg-window-closed', () => cb()),
-  onSttCfgWindowClosed: cb => ipcRenderer.on('stt-cfg-window-closed', () => cb()),
+
   sendToPetWindow: data => ipcRenderer.send('chat-to-pet', data),
   onFromPetWindow: cb => ipcRenderer.on('from-pet-window', (_, data) => cb(data)),
   onFromChatWindow: cb => ipcRenderer.on('from-chat-window', (_, data) => cb(data)),

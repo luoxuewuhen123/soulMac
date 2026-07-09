@@ -34,7 +34,7 @@ const _mcpSearchCache = { ts: 0, key: '', data: null };
 
 const MIME_MAP = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.json': 'application/json', '.png': 'image/png', '.moc3': 'application/octet-stream', '.zip': 'application/zip' };
 
-let mainWindow, server, chatWindow, aiCfgWindow, skillsWindow, sttCfgWindow, toolsWindow, instructionsWindow;
+let mainWindow, server, chatWindow, aiCfgWindow, skillsWindow, toolsWindow, instructionsWindow;
 let _windowOnTop = true; // 跟踪窗口期望的置顶状态
 
 function readBody(req) {
@@ -52,7 +52,7 @@ function readBody(req) {
 function ok(res) { res.writeHead(200); res.end('ok'); }
 
 // ===== 数据读写路由（从 handler 映射表自动生成） =====
-const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','stt-cfg','experiences','skills','instructions'];
+const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','experiences','skills','instructions'];
 const dataHandlers = {};
 DATA_NAMES.forEach(n => {
   dataHandlers['POST /save-'+n] = (req, res) => readBody(req).then(b => storage.save(n, b, () => ok(res)));
@@ -1293,7 +1293,6 @@ app.whenReady().then(async () => {
       hasApi
         ? { label: '✅ 已配置AI', click: () => mainWindow.webContents.send('menu', 'config', '') }
         : { label: '⚙️ 配置AI', click: () => mainWindow.webContents.send('menu', 'config', '') },
-      { label: '🎤 配置语音输入', click: () => mainWindow.webContents.send('menu', 'stt-config', '') },
       { type: 'separator' },
       { label: '💬 聊天', click: () => mainWindow.webContents.send('menu', 'chat', '') },
       { type: 'separator' },
@@ -1319,11 +1318,7 @@ app.whenReady().then(async () => {
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
     });
     chatWindow.loadURL(`http://127.0.0.1:${port}/chat.html`);
-    // 授予麦克风权限（语音输入使用 getUserMedia / MediaRecorder）
-    chatWindow.webContents.session.setPermissionRequestHandler((_, permission, cb) => {
-      if (permission === 'media' || permission === 'microphone' || permission === 'audioCapture') cb(true);
-      else cb(false);
-    });
+    // 已移除语音输入功能
     chatWindow.on('closed', () => { chatWindow = null; });
   });
   // AI配置窗口
@@ -1336,17 +1331,6 @@ app.whenReady().then(async () => {
     });
     aiCfgWindow.loadURL(`http://127.0.0.1:${port}/ai-cfg.html`);
     aiCfgWindow.on('closed', () => { aiCfgWindow = null; if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('ai-cfg-window-closed'); });
-  });
-  // STT（语音输入）配置窗口
-  ipcMain.on('open-stt-cfg-window', () => {
-    if (sttCfgWindow && !sttCfgWindow.isDestroyed()) { if(sttCfgWindow.isMinimized())sttCfgWindow.restore(); sttCfgWindow.focus(); return; }
-    sttCfgWindow = new BrowserWindow({
-      width: 360, height: 360, resizable: false,
-      transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
-      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
-    });
-    sttCfgWindow.loadURL(`http://127.0.0.1:${port}/stt-cfg.html`);
-    sttCfgWindow.on('closed', () => { sttCfgWindow = null; if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('stt-cfg-window-closed'); });
   });
   // 技能管理窗口
   ipcMain.on('open-skills-window', () => {
