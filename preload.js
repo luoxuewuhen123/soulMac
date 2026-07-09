@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('api', {
   sendToPetWindow: data => ipcRenderer.send('chat-to-pet', data),
   onFromPetWindow: cb => ipcRenderer.on('from-pet-window', (_, data) => cb(data)),
   onFromChatWindow: cb => ipcRenderer.on('from-chat-window', (_, data) => cb(data)),
+  onMcpSkillsChanged: cb => { const f = () => cb(); ipcRenderer.on('mcp-skills-changed', f); return () => ipcRenderer.removeListener('mcp-skills-changed', f); },
   getTime: () => {
     const d=new Date();
     return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');

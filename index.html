@@ -685,6 +685,8 @@ async function ensureToolsCfg(){
 let _cachedMcpTools=null;
 let _cachedMcpToolsTime=0;
 const MCP_CACHE_TTL=30000;
+// 强制刷新缓存（技能增删后立即调用，消除缓存窗口期）
+function invalidateMcpCache(){_cachedMcpTools=null;_cachedMcpToolsTime=0;}
 async function getMcpTools(){
   const now=Date.now();
   if(!_cachedMcpTools||now-_cachedMcpToolsTime>MCP_CACHE_TTL){
@@ -841,7 +843,7 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
           if(name==='search'){const mode=args.mode||'keyword';const ctx=args.context!==undefined?args.context:2;const cs=args.caseSensitive?'true':'false';const r=await fetchTool('/search?q='+encodeURIComponent(args.q)+'&mode='+mode+'&context='+ctx+'&caseSensitive='+cs,{},{signal:ac.signal});if(r.ok){const data=await r.json();const rs=data.results||[];const ml={keyword:'全文',definition:'定义',reference:'引用',regex:'正则'}[mode]||mode;st({text:'✓ 搜索 "'+args.q+'" '+rs.length+'个结果',ok:true});if(rs.length===0)return '✓ search "'+args.q+'" (0个结果)';const more=data.truncated?'\n⚠️ 结果较多，仅显示前50/共'+data.total+'个，可缩小范围或用更精确的匹配':'';return '✓ search('+ml+') "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+rs.map(d=>'  '+d.file+':'+d.line+(ctx>0?'\n'+d.context.split('\n').map(l=>'    '+l).join('\n'):'')).join('\n---\n')+more;}st({text:'✗ 搜索失败',err:true});return '✗ search';}
           if(name==='lint_file'){const r=await fetchTool('/lint-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 检查语法 '+args.path,err:true});return '✗ lint_file '+args.path;}const rd=await r.json();if(rd.ok===null){st({text:'— 跳过语法检查 '+args.path+' ('+rd.output+')',ok:true});return '— lint_file '+args.path+' ('+rd.output+')';}st({text:(rd.ok?'✓ ':'✗ ')+'检查语法 '+args.path,ok:rd.ok,err:!rd.ok});return (rd.ok?'✓ ':'✗ ')+'lint_file '+args.path+' '+(rd.ok?'语法通过':'语法错误')+'\n'+(rd.output||'').substring(0,1000);}
           if(name==='tree'){const path=args.path||'.';const maxDepth=args.maxDepth||3;const ignore=args.ignore||[];st({text:'🌳 目录树: '+path,ok:false});const r=await fetchTool('/tree?path='+encodeURIComponent(path)+'&maxDepth='+maxDepth+(ignore.length?'&ignore='+encodeURIComponent(ignore.join(',')):''),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 目录树失败',err:true});return '✗ tree: 请求失败';}const c=await r.text();if(!c.trim()){st({text:'🌳 空目录或不存在: '+path,ok:true});return '⚠️ tree: 目录为空或不存在';}st({text:'✓ 目录树: '+path,ok:true});return c;}
-          if(name==='bash'){const cmdShow=args.command.replace(/\\/g,'/');const cmdExec=args.command.replace(/\//g,'\\');st({text:'💻 执行: '+cmdShow,ok:false});const r=await fetchTool('/bash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmdExec})},{timeout:200000,signal:ac.signal});if(!r.ok){st({text:'✗ 命令执行失败: '+cmdShow,err:true});return '✗ bash: 执行失败';}const rd=await r.json();const output=rd.output;const ok=rd.code===0;st({text:(ok?'✓ 执行完成: ':'✗ 执行失败: ')+cmdShow+(ok?' (exit:'+rd.code+')':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' bash: exit code='+rd.code+'\n'+output;}
+          if(name==='bash'){const cmdRaw=args.command;st({text:'💻 执行: '+cmdRaw,ok:false});const r=await fetchTool('/bash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmdRaw})},{timeout:200000,signal:ac.signal});if(!r.ok){st({text:'✗ 命令执行失败: '+cmdShow,err:true});return '✗ bash: 执行失败';}const rd=await r.json();const output=rd.output;const ok=rd.code===0;st({text:(ok?'✓ 执行完成: ':'✗ 执行失败: ')+cmdShow+(ok?' (exit:'+rd.code+')':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' bash: exit code='+rd.code+'\n'+output;}
                   if(name==='read_image'){
             const vision=getVisionCapability();
             if(!vision){
@@ -855,7 +857,7 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
             st({text:'🌐 抓取网页: '+args.url,ok:true});
             try{
               // 长页面自动翻页：后端支持 maxLen/offset，逐页拉取直到取完或达到上限
-              const PAGE=5000, MAX_PAGES=3, HARD_CAP=12000;
+              const PAGE=8000, MAX_PAGES=5, HARD_CAP=40000;
               let full='', offset=0, truncated=false;
               for(let i=0;i<MAX_PAGES;i++){
                 const r=await fetchTool('/web-fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:args.url,maxLen:PAGE,offset})},{signal:ac.signal});
@@ -887,8 +889,18 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
 
 // 模型上下文窗口配置（token）—— 优先使用 aiCfg 中用户配置的值
 const MODEL_CONTEXTS={
+  // DeepSeek V4 Flash：原生 1M 上下文
   'deepseek-v4-flash':1000000,
-  'qwen-max':32768,
+  // 通义千问 Qwen3-Max：256K 上下文
+  'qwen-max':256000,
+  // 智谱 GLM-5.2：1M 上下文
+  'glm-5.2':1000000,
+  // Kimi K2.5：256K 上下文
+  'kimi-k2':256000,
+  // 豆包 Seed-2.0 Pro：256K 上下文
+  'doubao-seed-2.0-pro':256000,
+  // 文心 ERNIE 5.0：128K 上下文
+  'ernie-5.0':128000,
 };
 function getModelContextWindow() {
   // 用户已在配置页设置了上下文值 → 优先使用
@@ -929,8 +941,8 @@ async function buildAiContext(scenario) {
     if (pR.ok) projectText += '当前项目目录是：' + (await pR.text());
     if (iR.ok) {
       const idx = await iR.json();
-      const lines = idx.slice(0, 300).map(f => '  ' + f.path + ' (' + f.lines + '行)');
-      projectText += '\n=== 项目文件索引（共' + idx.length + '个文件）===\n' + lines.join('\n') + (idx.length > 300 ? '\n  ...(仅显示前300个)' : '');
+      const lines = idx.slice(0, 1000).map(f => '  ' + f.path + ' (' + f.lines + '行)');
+      projectText += '\n=== 项目文件索引（共' + idx.length + '个文件）===\n' + lines.join('\n') + (idx.length > 1000 ? '\n  ...(仅显示前1000个)' : '');
     }
   } catch (e) {}
   const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先思考要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先思考出完整的计划再执行：执行时尽量并行操作，减少执行次数。' + projectText + '注意：优先使用专用工具而非 Bash 命令。' };
@@ -979,7 +991,7 @@ async function truncateMsgs(){
       ...dropped.map(m=>({role:m.role,content:(m.role==='user'?'主人：':'宠物：')+' ['+m.time+'] '+m.content})),
       {role:'system',content:'作为主人的灵魂伴侣，为了能在有限的记忆中更好的理解主人，你需要对这些聊天记录进行摘要，这些聊天记录会消失变成摘要的形式出现在你的记忆中。'},
     ];
-    const ac2=new AbortController();const t2=setTimeout(()=>ac2.abort(),30000);
+    const ac2=new AbortController();const t2=setTimeout(()=>ac2.abort(),60000);
     const d=await callAI(aiMsgs,ac2.signal);
     clearTimeout(t2);
     if(!d)return;
@@ -1121,7 +1133,7 @@ async function handleChatMsg(userText){
     if(!finalReply){
       const replyMsgs=messages.map(m=>(m.role==='tool'&&m.content&&m.content.length>3000)?{...m,content:m.content.substring(0,200)+'\n...(文件内容省略，共'+m.content.split('\n').length+'行)'}:m);
       replyMsgs.push({role:'system',content:'当前时间是'+getTime()+'，主人跟你聊天了，你可以自主决定做什么'});
-      ac=new AbortController();t=setTimeout(()=>ac.abort(),30000);
+      ac=new AbortController();t=setTimeout(()=>ac.abort(),60000);
       const d=await callAI(replyMsgs,ac.signal,null,true);
       clearTimeout(t);
       if(d){
@@ -1185,6 +1197,8 @@ window.api?.onFromChatWindow(data=>{
 window.api?.onAiCfgWindowClosed(async()=>{
   await loadAllConfigs();
 });
+// 技能变更时立即清除 MCP 工具缓存，下次 AI 调用自动拉取最新工具列表
+window.api?.onMcpSkillsChanged(()=>{invalidateMcpCache();});
 
 
 

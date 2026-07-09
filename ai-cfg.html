@@ -139,7 +139,7 @@ function onModelChange(){
 }
 async function loadCfg(){
   try{
-    const ac=new AbortController();const tm=setTimeout(()=>ac.abort(),5000);
+    const ac=new AbortController();const tm=setTimeout(()=>ac.abort(),15000);
     const r=await fetch('/load-ai-cfg',{signal:ac.signal});
     clearTimeout(tm);
     if(r.ok){

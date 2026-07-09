@@ -272,7 +272,7 @@ function startServer() {
             for (const e of entries) {
               if (e.name.startsWith('.') || e.name === 'node_modules') continue;
               const fp = path.join(dir, e.name);
-              if (e.isDirectory()) { await walk(fp); if (results.length >= 50) return; }
+              if (e.isDirectory()) { await walk(fp); if (results.length >= 100) return; }
               else if (SEARCH_EXTS.includes(path.extname(e.name).toLowerCase())) {
                 try {
                   const content = await fs.promises.readFile(fp, 'utf-8');
@@ -284,16 +284,16 @@ function startServer() {
                       ? [...lines.slice(Math.max(0,i-ctxLines),i), '→'+lines[i], ...lines.slice(i+1, Math.min(lines.length,i+1+ctxLines))].join('\n')
                       : lines[i];
                     results.push({ file: path.relative(__dirname, fp), line: i+1, content: lines[i].trim(), context, lines: totalLines });
-                    if (results.length >= 50) break;
+                    if (results.length >= 100) break;
                   }
                 } catch(e) {}
-                if (results.length >= 50) return;
+                if (results.length >= 100) return;
               }
             }
           }
           await walk(__dirname);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ results: results.slice(0,50), total: results.length, truncated: results.length >= 50 }));
+          res.end(JSON.stringify({ results: results.slice(0,100), total: results.length, truncated: results.length >= 100 }));
         })();
         return;
       }
@@ -439,8 +439,8 @@ function startServer() {
               res.end(JSON.stringify({ code: err ? (err.code||1) : 0, output }));
             };
             const child = isWin
-              ? execFile('powershell', ['-NoProfile', '-Command', command], { cwd: __dirname, timeout: 180000, maxBuffer: 1024*1024 }, cb)
-              : execFile('/bin/sh', ['-c', command], { cwd: __dirname, timeout: 180000, maxBuffer: 1024*1024 }, cb);
+              ? execFile('powershell', ['-NoProfile', '-Command', command], { cwd: __dirname, timeout: 180000, maxBuffer: 10*1024*1024 }, cb)
+              : execFile('/bin/sh', ['-c', command], { cwd: __dirname, timeout: 180000, maxBuffer: 10*1024*1024 }, cb);
             // 确保子进程退出时清理引用，包括超时/崩溃等非正常退出场景
             _bashChildren.add(child);
             const cleanupChild = () => { _bashChildren.delete(child); if (currentBashChild === child) currentBashChild = null; };
@@ -453,13 +453,26 @@ function startServer() {
       }
       // 中断当前正在执行的 bash 命令（供前端"中断"按钮调用，真正终止后台子进程）
       if (req.method === 'POST' && req.url === '/bash-abort') {
+        // Windows 下用 taskkill /T 终止进程树，Unix 用 SIGTERM
+        const killProc = (child) => {
+          try {
+            if (process.platform === 'win32') {
+              // taskkill /F /T 强制终止进程及其所有子进程
+              execFile('taskkill', ['/F', '/T', '/PID', String(child.pid)], { timeout: 3000 }, () => {});
+            } else {
+              child.kill('SIGTERM');
+              // 再发 SIGKILL 确保子进程树也被终止（SIGTERM 后等 500ms 用负 PID 杀进程组）
+              setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch(e) {} }, 500);
+            }
+          } catch (e) { /* 进程可能已退出 */ }
+        };
         if (currentBashChild) {
-          try { currentBashChild.kill('SIGTERM'); } catch (e) {}
+          killProc(currentBashChild);
           currentBashChild = null;
         }
         // 杀死所有正在运行的 bash 子进程（含并行）
         for (const child of _bashChildren) {
-          try { child.kill('SIGTERM'); } catch (e) {}
+          killProc(child);
         }
         _bashChildren.clear();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -534,9 +547,13 @@ function startServer() {
                     else removed.push(i+1);
                   }else if(i<newLines.length&&i>=oldLines.length)added.push(i+1);
                 }
-                // 如果变化行太多只给摘要
+                // 直接返回完整差异，不截断；包含具体行级变化和统计
                 const changeCount=(added.length+removed.length+(diff?1:0));
-                diff=changeCount>20?{summary:`${changeCount} 行变化（+${added.length} -${removed.length}）`,changeCount}:(diff||{summary:'仅行数变化',changeCount});
+                if (changeCount > 0) {
+                  if (diff) diff.changeCount = changeCount;
+                  // 若只有行数变化（无具体 diff），给摘要
+                  if (!diff) diff = {summary:`${changeCount} 行变化（+${added.length} -${removed.length}）`, changeCount, added, removed};
+                }
               }
             }catch(e){/* 新文件，无差异 */}
             try { fs.mkdirSync(path.dirname(resolved), { recursive: true }); } catch (e) {}
@@ -730,15 +747,26 @@ function startServer() {
         try{
           const content=fs.readFileSync(fp,'utf8');
           const errs=[];
-          // 检查基本的标签闭合
           const selfClosing=new Set(['br','hr','img','input','meta','link','area','base','col','embed','source','track','wbr']);
           const stack=[];
-          // 先剥掉注释、<script>、<style> 内的内容，避免把 JS/CSS 里的 < > 误判成标签
-          // （例如 CSS 的 div > p 子选择器会被误认成 <p>，JS 字符串里的 '<div>' 会被误判为未闭合标签）
-          const working=content
-            .replace(/<!--[\s\S]*?-->/g,'')
-            .replace(/<script\b[\s\S]*?<\/script>/gi,'')
-            .replace(/<style\b[\s\S]*?<\/style>/gi,'');
+          // 剥掉注释、<script>、<style>、模板字面量和纯文本标签内的内容
+          // 使用非递归方法：逐字符扫描，跟踪当前是否在 &lt;script&gt;/&lt;style&gt;/注释中
+          let working = content
+            .replace(/<!--[\s\S]*?-->/g, '')
+            // 替换 script 和 style 块为占位文本（保留行号一致性用换行代替）
+            .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, match => match.replace(/[^\n]/g, ''))
+            .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, match => match.replace(/[^\n]/g, ''))
+            // 去掉模板字面量 `` 和普通字符串 '' / "" 内的内容，防止误判
+            .replace(/`[^`]*`/g, match => match.replace(/[^\n]/g, ''))
+            .replace(/'[^']*'/g, match => match.replace(/[^\n]/g, ''))
+            .replace(/"[^"]*"/g, match => match.replace(/[^\n]/g, ''));
+          // 再剥离更复杂的嵌套情况：SVG <text>、<template> 等容器内的内容
+          // 用循环剥掉多层嵌套容器（最多 5 层深度）
+          for (let i = 0; i < 5; i++) {
+            const before = working;
+            working = working.replace(/<(svg|template|text|xmp|noembed|noframes)\b[^>]*>[\s\S]*?<\/\1>/gi, match => match.replace(/[^\n]/g, ''));
+            if (working === before) break;
+          }
           const tagRe=/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
           let match;
           while((match=tagRe.exec(working))!==null){
@@ -747,7 +775,6 @@ function startServer() {
             else if(!full.endsWith('/>')&&!selfClosing.has(tag))stack.push(tag);
           }
           while(stack.length>0)errs.push(`未闭合的标签 <${stack.pop()}>`);
-          // 检查 doctype：接受任意 <!DOCTYPE ...> 声明（大小写不敏感），不限死为 <!DOCTYPE html>
           if(!/<!DOCTYPE[\s\S]*?>/i.test(content))errs.push('缺少 <!DOCTYPE> 声明');
           if(errs.length>0)cb(new Error(errs.join('; ')),errs.join('\n'));
           else cb(null,'语法正确');
@@ -913,6 +940,7 @@ function startServer() {
             const { id, cfg } = JSON.parse(body);
             if (!id || !cfg) { res.writeHead(400); res.end('{"error":"missing id or cfg"}'); return; }
             await mcp.addServer(id, cfg);
+            if (mainWindow && !mainWindow.isDestroyed()) { try { mainWindow.webContents.send('mcp-skills-changed'); } catch(e) {} }
             res.writeHead(200); res.end();
           } catch (e) {
             res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
@@ -927,6 +955,7 @@ function startServer() {
             const { id } = JSON.parse(body);
             if (!id) { res.writeHead(400); res.end('{"error":"missing id"}'); return; }
             await mcp.removeServer(id);
+            if (mainWindow && !mainWindow.isDestroyed()) { try { mainWindow.webContents.send('mcp-skills-changed'); } catch(e) {} }
             res.writeHead(200); res.end();
           } catch (e) {
             res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
@@ -936,7 +965,10 @@ function startServer() {
       }
       // MCP 重载（添加/卸载技能后重新连接）
       if (req.method === 'POST' && req.url === '/mcp-reload') {
-        mcp.reload().then(() => { res.writeHead(200); res.end(); }).catch(() => { res.writeHead(500); res.end(); });
+        mcp.reload().then(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) { try { mainWindow.webContents.send('mcp-skills-changed'); } catch(e) {} }
+          res.writeHead(200); res.end();
+        }).catch(() => { res.writeHead(500); res.end(); });
         return;
       }
       // MCP 调试状态
