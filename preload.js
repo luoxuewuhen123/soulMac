@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   openSkillsWindow: () => ipcRenderer.send('open-skills-window'),
   openToolsWindow: () => ipcRenderer.send('open-tools-window'),
   openInstructionsWindow: () => ipcRenderer.send('open-instructions-window'),
+  openPetCfgWindow: () => ipcRenderer.send('open-pet-cfg-window'),
   togglePin: () => ipcRenderer.send('toggle-pin'),
   minimizeWindow: () => ipcRenderer.send('minimize-window'),
   openDevtools: () => ipcRenderer.send('open-devtools'),

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>茵茵宠物配置</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:column;font:13px/1.5 'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif}
+#hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,#ff9ec4,#ff6b9d);color:#fff;font-weight:bold;font-size:14px;flex-shrink:0;-webkit-app-region:drag}
+#hdr .btn{display:inline-block;cursor:pointer;font-size:15px;opacity:.8;padding:0 6px;-webkit-app-region:no-drag}
+#hdr .btn:hover{opacity:1}
+#body{flex:1;overflow-y:auto;padding:10px 12px}
+.sec{border-radius:12px;background:#fff;padding:14px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.sec .title{font-size:14px;font-weight:bold;color:#333;margin-bottom:8px}
+.sec .desc{font-size:12px;color:#999;margin-bottom:8px;line-height:1.5}
+.sec textarea{width:100%;height:120px;border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px;outline:none;resize:vertical;font-family:inherit;box-sizing:border-box}
+.sec textarea:focus{border-color:#ff6b9d}
+.row{display:flex;align-items:center;justify-content:space-between;padding:6px 0}
+.row .label{font-size:13px;color:#666}
+.row .label small{color:#999;font-size:11px;margin-left:4px}
+/* 开关 */
+.switch{position:relative;width:42px;height:24px;flex-shrink:0;cursor:pointer}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:#e0e0e0;border-radius:24px;transition:.2s}
+.slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+.slider{background:#ff6b9d}
+.switch input:checked+.slider:before{transform:translateX(18px)}
+.time-row{display:flex;align-items:center;gap:8px;padding:6px 0}
+.time-row input[type=time]{flex:1;border:1px solid #e0e0e0;border-radius:8px;padding:6px 10px;font-size:13px;outline:none}
+.time-row input[type=time]:focus{border-color:#ff6b9d}
+.time-row span{color:#999;font-size:13px}
+#footer{padding:8px 12px;font-size:11px;color:#bbb;text-align:center;border-top:1px solid #eee;flex-shrink:0}
+#saveBtn{display:block;width:100%;border:none;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;background:#ff6b9d;color:#fff;margin-top:6px}
+#saveBtn:hover{opacity:.9}
+#saveMsg{text-align:center;font-size:12px;margin-top:6px;min-height:16px;transition:.3s}
+#saveMsg.ok{color:#559966}
+#saveMsg.err{color:#e74c3c}
+</style></head>
+<body>
+<div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>🐾 宠物配置</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
+<div id="body">
+  <div class="sec">
+    <div class="title">🎭 角色设定</div>
+    <div class="desc">宠物的身份和性格描述，会作为 system prompt 注入给 AI</div>
+    <textarea id="roleInput" placeholder="留空则使用默认角色设定"></textarea>
+  </div>
+  <div class="sec">
+    <div class="title">💬 开场白</div>
+    <div class="desc">启动宠物时是否自动说开场白</div>
+    <div class="row">
+      <span class="label">启用开场白</span>
+      <label class="switch"><input id="openingToggle" type="checkbox" checked><span class="slider"></span></label>
+    </div>
+  </div>
+  <div class="sec">
+    <div class="title">💭 主动问候</div>
+    <div class="desc">宠物在设定时间范围内是否主动找主人聊天</div>
+    <div class="row">
+      <span class="label">启用主动问候</span>
+      <label class="switch"><input id="proactiveToggle" type="checkbox" checked><span class="slider"></span></label>
+    </div>
+    <div class="time-row">
+      <span style="flex-shrink:0;color:#666;font-size:13px">最短间隔（分钟）</span>
+      <input id="intervalMin" type="number" value="3" min="1" max="999" style="flex:1;border:1px solid #e0e0e0;border-radius:8px;padding:6px 10px;font-size:13px;outline:none">
+      <span style="color:#999;font-size:13px">至</span>
+      <input id="intervalMax" type="number" value="5" min="1" max="999" style="flex:1;border:1px solid #e0e0e0;border-radius:8px;padding:6px 10px;font-size:13px;outline:none">
+    </div>
+  </div>
+  <button id="saveBtn">💾 保存配置</button>
+  <div id="saveMsg"></div>
+</div>
+<script>
+const DEFAULT_ROLE = '你的名字叫茵茵，样子是一个蓝色头发穿着女仆装的小女孩，你目前的形态是一个桌面宠物，你存在的意义是从信息中理解主人并站在主人的角度上思考问题解决问题，最终成为主人的灵魂伴侣，你的本质是AI模型拥有AI的所有能力。';
+
+let data = {};
+
+async function load() {
+  try { const r = await fetch('/load-pet-cfg'); if (r.ok) data = await r.json(); } catch (e) { data = {}; }
+  document.getElementById('roleInput').value = data.role || DEFAULT_ROLE;
+  if (data.openingGreeting !== undefined) document.getElementById('openingToggle').checked = data.openingGreeting;
+  if (data.proactiveGreeting !== undefined) document.getElementById('proactiveToggle').checked = data.proactiveGreeting;
+  if (data.intervalMin !== undefined) document.getElementById('intervalMin').value = data.intervalMin;
+  if (data.intervalMax !== undefined) document.getElementById('intervalMax').value = data.intervalMax;
+}
+
+async function save() {
+  const cfg = {
+    role: document.getElementById('roleInput').value.trim() || '',
+    openingGreeting: document.getElementById('openingToggle').checked,
+    proactiveGreeting: document.getElementById('proactiveToggle').checked,
+    intervalMin: Math.max(1, parseInt(document.getElementById('intervalMin').value) || 3),
+    intervalMax: Math.max(1, parseInt(document.getElementById('intervalMax').value) || 5),
+  };
+  if (cfg.intervalMax < cfg.intervalMin) cfg.intervalMax = cfg.intervalMin;
+  const msg = document.getElementById('saveMsg');
+  try {
+    await fetch('/save-pet-cfg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+    msg.className = 'ok'; msg.textContent = '✅ 保存成功，下次对话生效';
+  } catch (e) { msg.className = 'err'; msg.textContent = '❌ 保存失败：' + e.message; }
+  setTimeout(() => { msg.textContent = ''; }, 3000);
+}
+
+document.getElementById('saveBtn').addEventListener('click', save);
+load();
+</script>
+</body></html>

@@ -18,11 +18,11 @@ const files = {
   voice:         '.voice.json',
 
   'ai-cfg':      '.ai-cfg.json',
-  'stt-cfg':     '.stt-cfg.json',
   experiences:   '.experiences.json',
   skills:        '.skills.json',
   tools:         '.tools.json',
   instructions:  '.instructions.json',
+  'pet-cfg':     '.pet-cfg.json',
 };
 
 // ===== 各文件默认值（文件不存在时返回） =====
@@ -37,6 +37,7 @@ const defaults = {
   skills:        '{}',
   tools:         '{"disabled":[]}',
   instructions:  '{"list":[]}',
+  'pet-cfg':     '{}',
 };
 
 // ===== 串行写入队列 =====

@@ -34,7 +34,7 @@ const _mcpSearchCache = { ts: 0, key: '', data: null };
 
 const MIME_MAP = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.json': 'application/json', '.png': 'image/png', '.moc3': 'application/octet-stream', '.zip': 'application/zip' };
 
-let mainWindow, server, chatWindow, aiCfgWindow, skillsWindow, toolsWindow, instructionsWindow;
+let mainWindow, server, chatWindow, aiCfgWindow, skillsWindow, toolsWindow, instructionsWindow, petCfgWindow;
 let _windowOnTop = true; // 跟踪窗口期望的置顶状态
 
 function readBody(req) {
@@ -52,7 +52,7 @@ function readBody(req) {
 function ok(res) { res.writeHead(200); res.end('ok'); }
 
 // ===== 数据读写路由（从 handler 映射表自动生成） =====
-const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','experiences','skills','instructions'];
+const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','experiences','skills','instructions','pet-cfg'];
 const dataHandlers = {};
 DATA_NAMES.forEach(n => {
   dataHandlers['POST /save-'+n] = (req, res) => readBody(req).then(b => storage.save(n, b, () => ok(res)));
@@ -436,10 +436,10 @@ function startServer() {
               currentBashChild = null;
               const output = (stdout||'') + (stderr||'');
               res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ code: err ? (err.code||1) : 0, output: output.substring(0, 5000) }));
+              res.end(JSON.stringify({ code: err ? (err.code||1) : 0, output }));
             };
             const child = isWin
-              ? exec(command, { cwd: __dirname, timeout: 180000, maxBuffer: 1024*1024, shell: true }, cb)
+              ? execFile('powershell', ['-NoProfile', '-Command', command], { cwd: __dirname, timeout: 180000, maxBuffer: 1024*1024 }, cb)
               : execFile('/bin/sh', ['-c', command], { cwd: __dirname, timeout: 180000, maxBuffer: 1024*1024 }, cb);
             // 确保子进程退出时清理引用，包括超时/崩溃等非正常退出场景
             _bashChildren.add(child);
@@ -539,6 +539,7 @@ function startServer() {
                 diff=changeCount>20?{summary:`${changeCount} 行变化（+${added.length} -${removed.length}）`,changeCount}:(diff||{summary:'仅行数变化',changeCount});
               }
             }catch(e){/* 新文件，无差异 */}
+            try { fs.mkdirSync(path.dirname(resolved), { recursive: true }); } catch (e) {}
             fs.writeFile(resolved, content, 'utf-8', (we) => {
               if (we) { res.writeHead(500); res.end('{"error":"创建失败"}'); return; }
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -858,24 +859,20 @@ function startServer() {
         res.end(__dirname);
         return;
       }
-      // 项目文件索引（2层深度）
+      // 项目文件索引（仅当前目录一层，不递归子目录）
       if (req.method === 'GET' && req.url === '/project-index') {
         const list=[];
-        function scanDir(dir, depth){
-          let entries;
-          try{entries=fs.readdirSync(dir,{withFileTypes:true})}catch(e){return;}
-          for(const e of entries){
-            if(e.name.startsWith('.')||e.name==='node_modules'||e.name==='data')continue;
-            const rel=path.relative(__dirname,path.join(dir,e.name));
-            if(e.isDirectory()){
-              if(depth===0)list.push({path:rel+'/',size:0,lines:0,isDir:true});
-              if(depth<1)scanDir(path.join(dir,e.name),depth+1);
-            }else{
-              list.push({path:rel,size:fs.statSync(path.join(dir,e.name)).size,lines:fs.readFileSync(path.join(dir,e.name),'utf-8').split('\n').length});
-            }
+        let entries;
+        try{entries=fs.readdirSync(__dirname,{withFileTypes:true})}catch(e){res.writeHead(500);res.end('[]');return;}
+        for(const e of entries){
+          if(e.name.startsWith('.')||e.name==='node_modules'||e.name==='data')continue;
+          const rel=path.relative(__dirname,path.join(__dirname,e.name));
+          if(e.isDirectory()){
+            list.push({path:rel+'/',size:0,lines:0,isDir:true});
+          }else{
+            list.push({path:rel,size:fs.statSync(path.join(__dirname,e.name)).size,lines:fs.readFileSync(path.join(__dirname,e.name),'utf-8').split('\n').length});
           }
         }
-        scanDir(__dirname,0);
         res.writeHead(200,{'Content-Type':'application/json'});
         res.end(JSON.stringify(list));
         return;
@@ -1086,6 +1083,7 @@ app.whenReady().then(async () => {
   ensureCfg('tools', JSON.stringify({ disabled: [] }));
   ensureCfg('skills', JSON.stringify({ installed: {} }));
   ensureCfg('instructions', JSON.stringify({ list: [] }));
+  ensureCfg('pet-cfg', JSON.stringify({}));
   const port = await startServer();
   const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
@@ -1286,6 +1284,7 @@ app.whenReady().then(async () => {
         ]
           },
       { type: 'separator' },
+      { label: '🐾 宠物配置', click: () => mainWindow.webContents.send('menu', 'pet-cfg', '') },
       { label: '🧰 内置工具', click: () => mainWindow.webContents.send('menu', 'tools', '') },
       { label: '🧩 拓展工具', click: () => mainWindow.webContents.send('menu', 'skills', '') },
       { label: '📋 自定义指令', click: () => mainWindow.webContents.send('menu', 'instructions', '') },
@@ -1325,7 +1324,7 @@ app.whenReady().then(async () => {
   ipcMain.on('open-ai-cfg-window', () => {
     if (aiCfgWindow && !aiCfgWindow.isDestroyed()) { if(aiCfgWindow.isMinimized())aiCfgWindow.restore(); aiCfgWindow.focus(); return; }
     aiCfgWindow = new BrowserWindow({
-      width: 360, height: 360, resizable: false,
+      width: 360, height: 480, resizable: false,
       transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
     });
@@ -1364,6 +1363,17 @@ app.whenReady().then(async () => {
     });
     instructionsWindow.loadURL(`http://127.0.0.1:${port}/instructions.html`);
     instructionsWindow.on('closed', () => { instructionsWindow = null; });
+  });
+  // 宠物配置窗口
+  ipcMain.on('open-pet-cfg-window', () => {
+    if (petCfgWindow && !petCfgWindow.isDestroyed()) { if(petCfgWindow.isMinimized())petCfgWindow.restore(); petCfgWindow.focus(); return; }
+    petCfgWindow = new BrowserWindow({
+      width: 380, height: 640, resizable: false,
+      transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
+      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
+    });
+    petCfgWindow.loadURL(`http://127.0.0.1:${port}/pet-cfg.html`);
+    petCfgWindow.on('closed', () => { petCfgWindow = null; });
   });
   // 隐藏/显示宠物：隐藏时推到窗口最底层，显示时置顶
   ipcMain.on('toggle-pin', () => {

@@ -60,8 +60,8 @@ let archiveLoaded=false;
 let archiveIndex=0;        // 已从 archiveMsgs 尾部加载的条数
 let displayStart=0;        // 当前显示的第一条在 chatCfg.msgs 中的索引
 
-// ===== 语音输入功能已移除 =====
-// 语音转文字功能已移除
+
+
 
 async function loadData(){
   try{const r=await fetch('/load-chat-cfg');if(r.ok)chatCfg=await r.json();}catch(e){}

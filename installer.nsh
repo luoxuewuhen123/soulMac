@@ -8,12 +8,13 @@
 
 ; 卸载时询问是否保留用户数据
 !macro customUnInstall
-  ; 读取数据路径配置
+  ; 读取数据路径配置（去掉 FileRead 带回的换行符）
   StrCpy $R0 "$APPDATA\soul"
-  IfFileExists "$INSTDIR\data-path.ini" 0 +3
+  IfFileExists "$INSTDIR\data-path.ini" 0 +5
     FileOpen $R1 "$INSTDIR\data-path.ini" r
     FileRead $R1 $R0
     FileClose $R1
+    StrCpy $R0 $R0 -2 ; 去掉末尾的 $\r$\n
   
   StrCmp $R0 "" skipDelete
   MessageBox MB_YESNO "是否保留茵茵的数据文件？（聊天记录、AI 配置、拓展工具设置等）$\n$\n选「是」= 保留数据，下次重装可直接恢复$\n选「否」= 删除所有数据" \

@@ -1,67 +1,57 @@
-name: 构建安装包
+name: Build Installer
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]
+    branches: [ main, master ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - '茵茵和哥哥的小家/**'
   workflow_dispatch:
 
 jobs:
-  build-mac:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: 缓存 node_modules
-        uses: actions/cache@v3
-        with:
-          path: node_modules
-          key: macos-node-${{ hashFiles('package-lock.json') }}
-          restore-keys: macos-node-
-      - run: npm ci
-      - name: 构建 macOS 安装包
-        run: npm run dist:mac
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: 茵茵-桌面宠物_macOS
-          path: dist/*.dmg
-
-  build-win:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - name: 缓存 node_modules
-        uses: actions/cache@v3
-        with:
-          path: node_modules
-          key: win-node-${{ hashFiles('package-lock.json') }}
-          restore-keys: win-node-
-      - run: npm ci
-      - name: 构建 Windows 安装包
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows installer
         run: npm run dist:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
         with:
-          name: 茵茵-桌面宠物_Windows
+          name: 茵茵-桌面宠物-Windows
           path: dist/*.exe
 
-  release:
-    needs: [build-mac, build-win]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+  build-macos:
+    runs-on: macos-latest
     steps:
-      - uses: actions/download-artifact@v4
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          files: |
-            茵茵-桌面宠物_macOS/*
-            茵茵-桌面宠物_Windows/*
-          generate_release_notes: true
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS dmg
+        run: npm run dist:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: 茵茵-桌面宠物-macOS
+          path: dist/*.dmg
