@@ -83,6 +83,72 @@ function isCommandSafe(command) {
   return true;
 }
 
+// ===== Word(.docx) 原地文本替换：保留原有格式（字体/颜色/加粗/表格等）=====
+// docx 本质是 ZIP，文字在 word/document.xml 的 <w:t> 节点里。
+// 只在 <w:t> 文本节点上做替换，<w:rPr>（run 格式）等结构原样保留，从而不破坏原文档排版。
+function decodeXml(s) {
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+}
+function encodeXml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+function makeWt(attrs, text) {
+  let a = attrs ? attrs.trim() : '';
+  // 去掉已有的 xml:space，避免与新加的重复导致 XML 非法
+  a = a.replace(/xml:space\s*=\s*["'][^"']*["']/g, '').trim();
+  const open = a ? ' ' + a : '';
+  if (text === '') return `<w:t${open}/>`;
+  return `<w:t${open} xml:space="preserve">${encodeXml(text)}</w:t>`;
+}
+// 在 document.xml 中把 oldText 原地替换为 newText（保留格式），仅替换首次出现
+// 返回 { found, occurrences, result }
+function xmlTextReplace(xml, oldText, newText) {
+  if (!oldText) return { found: false, occurrences: 0 };
+  // 匹配所有 <w:t ...>...</w:t> 与自闭合 <w:t .../>
+  const re = /<w:t(\s[^>]*)?>([\s\S]*?)<\/w:t>|<w:t(\s[^>]*)?\s*\/>/g;
+  const nodes = [];
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    if (m[2] !== undefined) nodes.push({ attrs: m[1] || '', text: decodeXml(m[2]), index: m.index, raw: m[0] });
+    else nodes.push({ attrs: m[3] || '', text: '', index: m.index, raw: m[0] });
+  }
+  const plain = nodes.map(n => n.text).join('');
+  const occurrences = plain.split(oldText).length - 1;
+  if (occurrences === 0) return { found: false, occurrences: 0 };
+  const start = plain.indexOf(oldText);
+  const end = start + oldText.length;
+  let pos = 0, startNode = -1, startOff = 0, endNode = -1, endOff = 0;
+  for (let i = 0; i < nodes.length; i++) {
+    const len = nodes[i].text.length;
+    const ns = pos, ne = pos + len;
+    if (startNode < 0 && start >= ns && start <= ne) { startNode = i; startOff = start - ns; }
+    if (end >= ns && end <= ne) { endNode = i; endOff = end - ns; break; }
+    pos = ne;
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    if (i < startNode || i > endNode) { nodes[i].newRaw = nodes[i].raw; continue; }
+    if (i === startNode && i === endNode) {
+      const before = nodes[i].text.slice(0, startOff);
+      const after = nodes[i].text.slice(endOff);
+      nodes[i].newRaw = makeWt(nodes[i].attrs, before + newText + after);
+    } else if (i === startNode) {
+      nodes[i].newRaw = makeWt(nodes[i].attrs, nodes[i].text.slice(0, startOff) + newText);
+    } else if (i === endNode) {
+      nodes[i].newRaw = makeWt(nodes[i].attrs, nodes[i].text.slice(endOff));
+    } else {
+      // 夹在中间的 run：清空文字但保留 run 结构（格式随之保留）
+      nodes[i].newRaw = makeWt(nodes[i].attrs, '');
+    }
+  }
+  let result = '', cursor = 0;
+  for (const n of nodes) {
+    result += xml.slice(cursor, n.index) + n.newRaw;
+    cursor = n.index + n.raw.length;
+  }
+  result += xml.slice(cursor);
+  return { found: true, occurrences, result };
+}
+
 // 当前正在执行的 bash 子进程引用，供“中断”按钮通过 /bash-abort 真正终止后台进程
 let currentBashChild = null;
 
@@ -122,6 +188,53 @@ function startServer() {
             result = `✅ 已读取全部${total}行（第${offset+1}-${endLine}行）\n\n` + result;
           res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
           res.end(result);
+        });
+        return;
+      }
+      // 文档解析（PDF / DOCX）— 供 read_image / read_files 后端调用，提取文字供 AI 处理
+      if (req.method === 'POST' && req.url === '/parse-document') {
+        readBody(req).then(async body => {
+          try {
+            const { path: fp, asImage } = JSON.parse(body);
+            if (!fp) { res.writeHead(400); res.end(JSON.stringify({ error: 'empty path' })); return; }
+            const resolved = safePath(fp);
+            if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: 'forbidden' })); return; }
+            const ext = path.extname(resolved).toLowerCase();
+            // 图片文件 → 直接返回 base64 数据 URL
+            if (['.png','.jpg','.jpeg','.gif','.webp','.bmp'].includes(ext)) {
+              try {
+                const buf = fs.readFileSync(resolved);
+                const b64 = buf.toString('base64');
+                const mime = { '.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.bmp':'image/bmp' }[ext] || 'image/png';
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ type: 'image', data: `data:${mime};base64,${b64}` }));
+              } catch(e) { res.writeHead(404); res.end(JSON.stringify({ error: '图片读取失败' })); }
+              return;
+            }
+            // PDF
+            if (ext === '.pdf') {
+              try {
+                const pdf = require('pdf-parse');
+                const buf = fs.readFileSync(resolved);
+                const data = await pdf(buf);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ type: 'text', content: data.text, pages: data.numpages }));
+              } catch(e) { res.writeHead(500); res.end(JSON.stringify({ error: 'PDF 解析失败: ' + e.message })); }
+              return;
+            }
+            // DOCX
+            if (ext === '.docx') {
+              try {
+                const mammoth = require('mammoth');
+                const buf = fs.readFileSync(resolved);
+                const data = await mammoth.extractRawText({ buffer: buf });
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ type: 'text', content: data.value }));
+              } catch(e) { res.writeHead(500); res.end(JSON.stringify({ error: 'DOCX 解析失败: ' + e.message })); }
+              return;
+            }
+            res.writeHead(400); res.end(JSON.stringify({ error: '不支持的格式: ' + ext }));
+          } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid json' })); }
         });
         return;
       }
@@ -426,6 +539,110 @@ function startServer() {
         });
         return;
       }
+      // 创建格式化文档（Word / PDF）— AI 将文字内容写入指定格式
+      if (req.method === 'POST' && req.url === '/create-document') {
+        readBody(req).then(body => {
+          try {
+            const { path: fp, content } = JSON.parse(body);
+            if (!fp || content === undefined) { res.writeHead(400); res.end('{"error":"missing params"}'); return; }
+            const resolved = safePath(fp);
+            if (!resolved) { res.writeHead(403); res.end('{"error":"forbidden path"}'); return; }
+            const ext = path.extname(resolved).toLowerCase();
+            // Word (.docx)
+            if (ext === '.docx') {
+              try {
+                const { Document: DocX, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
+                const lines = content.split('\n');
+                const children = lines.map(l => {
+                  const t = l.trim();
+                  if (!t) return new Paragraph({ spacing: { after: 60 } });
+                  if (t.startsWith('## ')) return new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun({ text: t.slice(3), bold: true, size: 28 })] });
+                  if (t.startsWith('# ')) return new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: t.slice(2), bold: true, size: 36 })] });
+                  if (t.startsWith('- ') || t.startsWith('* ')) return new Paragraph({ spacing: { after: 40 }, indent: { left: 400 }, children: [new TextRun({ text: '• ' + t.slice(2), size: 21 })] });
+                  return new Paragraph({ spacing: { after: 60 }, children: [new TextRun({ text: l, size: 21 })] });
+                });
+                const doc = new DocX({ sections: [{ children }] });
+                Packer.toBuffer(doc).then(buf => {
+                  fs.writeFile(resolved, buf, (we) => {
+                    if (we) { res.writeHead(500); res.end(JSON.stringify({ error: '写入失败' })); return; }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, lines: lines.length }));
+                  });
+                });
+              } catch(e) { res.writeHead(500); res.end(JSON.stringify({ error: 'DOCX 生成失败: ' + e.message })); }
+              return;
+            }
+            // PDF
+            if (ext === '.pdf') {
+              try {
+                const PDFDocument = require('pdfkit');
+                const doc = new PDFDocument({ size: 'A4', margin: 50 });
+                const chunks = [];
+                doc.on('data', c => chunks.push(c));
+                doc.on('end', () => {
+                  fs.writeFile(resolved, Buffer.concat(chunks), (we) => {
+                    if (we) { res.writeHead(500); res.end(JSON.stringify({ error: '写入失败' })); return; }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, lines: content.split('\n').length }));
+                  });
+                });
+                const lines = content.split('\n');
+                for (const l of lines) {
+                  const t = l.trim();
+                  if (!t) { doc.moveDown(0.5); continue; }
+                  if (t.startsWith('## ')) doc.font('Helvetica-Bold').fontSize(16).text(t.slice(3), { underline: true }).moveDown(0.3);
+                  else if (t.startsWith('# ')) doc.font('Helvetica-Bold').fontSize(20).text(t.slice(2)).moveDown(0.3);
+                  else if (t.startsWith('- ') || t.startsWith('* ')) doc.font('Helvetica').fontSize(11).text('  •  ' + t.slice(2), { indent: 20 }).moveDown(0.2);
+                  else doc.font('Helvetica').fontSize(11).text(t).moveDown(0.3);
+                }
+                doc.end();
+              } catch(e) { res.writeHead(500); res.end(JSON.stringify({ error: 'PDF 生成失败: ' + e.message })); }
+              return;
+            }
+            res.writeHead(400); res.end(JSON.stringify({ error: '不支持的格式: ' + ext }));
+          } catch(e) { res.writeHead(400); res.end('{"error":"invalid json"}'); }
+        });
+        return;
+      }
+      // 原地编辑 Word 文档（.docx）：仅替换文字，保留原文档全部格式
+      if (req.method === 'POST' && req.url === '/edit-document') {
+        readBody(req).then(async body => {
+          try {
+            const { path: fp, oldText, newText } = JSON.parse(body);
+            if (!fp || oldText === undefined || newText === undefined) { res.writeHead(400); res.end(JSON.stringify({ error: 'missing params' })); return; }
+            const resolved = safePath(fp);
+            if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: 'forbidden' })); return; }
+            const ext = path.extname(resolved).toLowerCase();
+            if (ext !== '.docx') { res.writeHead(400); res.end(JSON.stringify({ error: 'edit_document 目前仅支持 .docx（PDF 暂不支持原地编辑，请用 create_document 新建）' })); return; }
+            const JSZip = require('jszip');
+            const buf = fs.readFileSync(resolved);
+            const zip = await JSZip.loadAsync(buf);
+            const docFile = zip.file('word/document.xml');
+            if (!docFile) { res.writeHead(500); res.end(JSON.stringify({ error: '文档结构异常：缺少 word/document.xml' })); return; }
+            const xml = await docFile.async('string');
+            const r = xmlTextReplace(xml, oldText, newText);
+            if (!r.found) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, found: false, message: `未在文档中找到文本：「${oldText}」，请先用 read_document 查看原文并复制完全一致的内容（区分大小写）` }));
+              return;
+            }
+            zip.file('word/document.xml', r.result);
+            const out = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
+            fs.writeFile(resolved, out, (we) => {
+              if (we) { res.writeHead(500); res.end(JSON.stringify({ error: '写入失败' })); return; }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                success: true,
+                message: r.occurrences > 1
+                  ? `已替换 1 处（文档中共有 ${r.occurrences} 处相同文本，如需全部替换请再次调用本工具）`
+                  : '已替换 1 处',
+                occurrences: r.occurrences,
+              }));
+            });
+          } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: '编辑失败: ' + e.message })); }
+        });
+        return;
+      }
       // 删除文件
       if (req.method === 'POST' && req.url === '/delete-file') {
         readBody(req).then(body => {
@@ -506,16 +723,22 @@ function startServer() {
           // 检查基本的标签闭合
           const selfClosing=new Set(['br','hr','img','input','meta','link','area','base','col','embed','source','track','wbr']);
           const stack=[];
+          // 先剥掉注释、<script>、<style> 内的内容，避免把 JS/CSS 里的 < > 误判成标签
+          // （例如 CSS 的 div > p 子选择器会被误认成 <p>，JS 字符串里的 '<div>' 会被误判为未闭合标签）
+          const working=content
+            .replace(/<!--[\s\S]*?-->/g,'')
+            .replace(/<script\b[\s\S]*?<\/script>/gi,'')
+            .replace(/<style\b[\s\S]*?<\/style>/gi,'');
           const tagRe=/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
           let match;
-          while((match=tagRe.exec(content))!==null){
+          while((match=tagRe.exec(working))!==null){
             const full=match[0],tag=match[1].toLowerCase();
             if(full.startsWith('</')){if(stack.length>0&&stack[stack.length-1]===tag)stack.pop();else if(!selfClosing.has(tag))errs.push(`多余的闭合标签 </${tag}>`);}
             else if(!full.endsWith('/>')&&!selfClosing.has(tag))stack.push(tag);
           }
           while(stack.length>0)errs.push(`未闭合的标签 <${stack.pop()}>`);
-          // 检查 doctype
-          if(!/<!DOCTYPE\s+html>/i.test(content))errs.push('缺少 <!DOCTYPE html> 声明');
+          // 检查 doctype：接受任意 <!DOCTYPE ...> 声明（大小写不敏感），不限死为 <!DOCTYPE html>
+          if(!/<!DOCTYPE[\s\S]*?>/i.test(content))errs.push('缺少 <!DOCTYPE> 声明');
           if(errs.length>0)cb(new Error(errs.join('; ')),errs.join('\n'));
           else cb(null,'语法正确');
         }catch(e){cb(e,e.message);}

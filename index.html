@@ -120,6 +120,7 @@ async function autoGreet(){
   let ac=new AbortController(),t;
   const abortAi=()=>{if(ac)ac.abort();clearTimeout(t);fetch('/bash-abort',{method:'POST'}).catch(()=>{});};
   const unsub=window.api?.onAiAbort(abortAi);
+  _abortChatFn=abortAi;
   aiBusy=true;
   const now=Date.now();
   if(now-lastChatTime<60000){aiBusy=false;scheduleProactive();return;}
@@ -140,7 +141,7 @@ async function autoGreet(){
     if(e.name==='AbortError'){scheduleProactive();}
     else{noAiGreet();scheduleProactive();}
   }finally{
-    aiBusy=false;unsub?.();window.api?.aiDone();
+    _abortChatFn=null;aiBusy=false;unsub?.();window.api?.aiDone();
   }
 }
 function noAiGreet(){
@@ -578,12 +579,46 @@ function cleanForTTS(text){
 }
 // AI配置（独立文件，不与聊天记录混在一起）
 let aiCfg={};
+function modelSupportsVision(model){
+  const m=(model||'').toLowerCase();
+  if(/^(gpt-4|gpt-4o|gpt-4\.1|gpt-4o-mini|o4-mini|gemini|claude|qwen-vl|qwen2?\.?5-vl|glm-4v|kimi-vl|moonshot-vl|step|yi-vl)/.test(m))return true;
+  if(/vl|vision|多模态/.test(m))return true;
+  return false;
+}
+// 判断模型是否支持 thinking（深度思考/推理）参数
+function modelSupportsThinking(model){
+  const m=(model||'').toLowerCase();
+  if(/deepseek/.test(m))return true;            // deepseek-chat / reasoner 支持 thinking beta
+  if(/^(gpt-4o|gpt-4\.1|o1|o3|o4|gemini|claude|qwq|qwen3|glm-z1|kimi|reasoner|r1)/.test(m))return true;
+  if(/reason|think|reasoner|r1|-t1|o1|o3/.test(m))return true;
+  return false;
+}
 async function callAI(messages, signal, tools, enableThinking) {
+    // 将图片数据从 tool 消息转为 user 多模态格式，让 AI 真正"看到"图片
+    // 仅当模型支持视觉时才转换；否则保持纯文本，避免部分模型（如 DeepSeek）接口不支持 image_url 而 400 报错
+    // 转换后原 tool 消息的 base64 替换为简短标记，避免下次循环重复发送长数据
+    const vision = aiCfg.vision!==undefined ? aiCfg.vision : modelSupportsVision(aiCfg.model);
+    const msgs = messages.map(m => {
+      if (vision && typeof m.content === 'string' && m.content.startsWith('📷 图片数据: ')) {
+        const dataUrl = m.content.replace('📷 图片数据: ', '');
+        m.content = '📷 图片数据: [已包含在 user 消息中]';
+        return { role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }] };
+      }
+      return m;
+    });
   const url=(aiCfg.url||'https://api.deepseek.com/v1')+'/chat/completions';
-  const body={model:aiCfg.model||'deepseek-v4-flash',messages};
-  if(tools){
-    body.tools=tools;
-    if(!enableThinking)body.thinking={type:'disabled'};
+  const body={model:aiCfg.model||'deepseek-v4-flash',messages:msgs};
+  if(tools)body.tools=tools;
+  // 深度思考：由"开启深度思考模式"复选框控制。勾选才把 thinking:{type:'enabled'} 拼进请求；
+  // 未勾选则明确下发 {type:'disabled'}（不拼接开启代码）。复选框优先于调用处参数。
+  const supportsThink=modelSupportsThinking(aiCfg.model);
+  let think;
+  if(aiCfg.thinking!==undefined)think=aiCfg.thinking;            // 复选框优先
+  else if(enableThinking!==undefined)think=enableThinking;       // 调用处兜底
+  else think=supportsThink;                                      // 模型默认
+  if(supportsThink){
+    if(think)body.thinking={type:'enabled'};
+    else body.thinking={type:'disabled'};
   }
   console.log('----- 发给AI的完整请求 -----');
   console.log(JSON.stringify(body, null, 2));
@@ -597,10 +632,13 @@ async function callAI(messages, signal, tools, enableThinking) {
   return data;
 }
 // 工具定义 - 每个工具独立
-function makeTools(){return [
-  {type:'function',function:{name:'read_files',description:'读取文件内容，支持批量读取（默认从开头读全部，支持 offset 分段读取）',strict:true,parameters:{type:'object',properties:{paths:{type:'array',description:'文件路径列表（支持相对路径和绝对路径）',items:{type:'string'}},offset:{type:'number',description:'跳过前N行，用于继续读取未读完的部分'},lines:{type:'number',description:'读取行数，不传则读全部'}},required:['paths'],additionalProperties:false}}},
+function makeTools(){
+  const all=[
+  {type:'function',function:{name:'read_files',description:'读取纯文本文件内容，支持批量读取（默认从开头读全部，支持 offset 分段读取）。注意：PDF/Word 文档请用 read_document 工具，图片请用 read_image 工具',strict:true,parameters:{type:'object',properties:{paths:{type:'array',description:'文件路径列表（支持相对路径和绝对路径）',items:{type:'string'}},offset:{type:'number',description:'跳过前N行，用于继续读取未读完的部分'},lines:{type:'number',description:'读取行数，不传则读全部'}},required:['paths'],additionalProperties:false}}},
   {type:'function',function:{name:'apply_patch',description:'用 SEARCH/REPLACE 方式编辑文件内容，适合修改文件中特定的代码段落。提供要查找的旧文本和替换的新文本，支持批量替换',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},patches:{type:'array',description:'替换列表',items:{type:'object',properties:{old:{type:'string',description:'要查找的旧文本（必须唯一存在于文件中）'},new:{type:'string',description:'替换成的新文本'}},required:['old','new'],additionalProperties:false}}},required:['path','patches'],additionalProperties:false}}},
-  {type:'function',function:{name:'write_file',description:'创建新文件或覆盖写入已有文件（自动计算差异，会尽量保留原有的格式和布局）',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},content:{type:'string',description:'完整的文件内容'}},required:['path','content'],additionalProperties:false}}},
+  {type:'function',function:{name:'write_file',description:'创建新文件或覆盖写入已有纯文本文件（自动计算差异，会尽量保留原有的格式和布局）。注意：需要生成 .docx 或 .pdf 时应使用 create_document 工具',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},content:{type:'string',description:'完整的文件内容'}},required:['path','content'],additionalProperties:false}}},
+  {type:'function',function:{name:'create_document',description:'仅用于【新建】格式化文档（支持 .docx 和 .pdf），自动识别 Markdown 转为排版（标题/列表/段落）。注意：编辑/修改【已有】Word 文档请改用 edit_document 工具，否则会丢失原文档的字体、颜色、表格、图片等原有格式！',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径（以 .docx 或 .pdf 结尾）'},content:{type:'string',description:'文档内容，支持 Markdown 格式（# 标题、## 子标题、- 列表）'}},required:['path','content'],additionalProperties:false}}},
+  {type:'function',function:{name:'edit_document',description:'原地编辑已有 Word（.docx）文档：在【保留原文档全部格式】（字体、颜色、加粗、表格、图片、段落样式等）的前提下，把指定的旧文本替换为新文本。适合修改文档里的措辞、数据、段落内容。这是搜索替换式编辑，oldText 必须是文档中真实存在的连续文本（区分大小写），可先 read_document 查看原文再复制。新建文档请用 create_document',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'Word 文档路径（.docx）'},oldText:{type:'string',description:'要被替换的旧文本（需与文档中完全一致，可先 read_document 查看原文）'},newText:{type:'string',description:'替换后的新文本'}},required:['path','oldText','newText'],additionalProperties:false}}},
   {type:'function',function:{name:'delete_file',description:'删除文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'mkdir',description:'创建目录',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'rename',description:'重命名/移动文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'原路径'},newPath:{type:'string',description:'新路径'}},required:['path','newPath'],additionalProperties:false}}},
@@ -609,9 +647,16 @@ function makeTools(){return [
   {type:'function',function:{name:'lint_file',description:'检查文件语法',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'list_dir',description:'列出目录内容',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径，默认当前目录'}},required:[],additionalProperties:false}}},
   {type:'function',function:{name:'bash',description:'执行终端命令，返回命令输出结果（stdout+stderr，最多5000字）。当前系统：'+(/Win/.test(navigator.userAgent)?'Windows (cmd.exe)':/Mac/.test(navigator.userAgent)?'macOS (zsh/bash)':'Linux (bash)')+' 请使用该系统兼容的命令',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的 shell 命令'}},required:['command'],additionalProperties:false}}},
+  {type:'function',function:{name:'read_image',description:'读取图片文件，返回图片数据。AI 可以识别图片内容（支持 png/jpg/gif/webp/bmp）',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'图片文件路径（支持相对路径和绝对路径）'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'read_document',description:'读取 PDF 或 Word（.docx）文档，提取其中的文字内容',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文档文件路径（支持相对路径和绝对路径）'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'web_fetch',description:'抓取网页内容（获取文字信息，速度快，适合查文档、搜资料）。长页面会自动翻页，最多返回约 15000 字（前若干段），如仍不足可再次调用获取更后面的内容',strict:true,parameters:{type:'object',properties:{url:{type:'string',description:'完整 URL，含 https://'}},required:['url'],additionalProperties:false}}},
   {type:'function',function:{name:'ask_question',description:'当需要额外信息时，向主人提问',strict:true,parameters:{type:'object',properties:{question:{type:'string',description:'要问主人的问题'}},required:['question'],additionalProperties:false}}},
-];}
+  ];
+  // 仅在用户勾选"模型支持图片识别（视觉多模态）"时，才把 read_image 工具拼进工具列表发给 AI；
+  // 未勾选则不提供该工具，AI 也就不会尝试读图（避免对不支持视觉的模型无效调用/报错）
+  if(!aiCfg.vision)return all.filter(t=>t.function.name!=='read_image');
+  return all;
+}
 // MCP 工具缓存：避免每次 AI 调用都重复拉取，30 秒后自动过期
 let _cachedMcpTools=null;
 let _cachedMcpToolsTime=0;
@@ -684,8 +729,8 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
         let mcpServer='',mcpTool='';
         if(name.startsWith('mcp__')){const p=name.split('__');mcpServer=p[1];mcpTool=p.slice(2).join('__');}
         const isBrowser=mcpServer==='browser';
-        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_files:'📖',apply_patch:'✏️',write_file:'📝',delete_file:'🗑',mkdir:'📁',rename:'📁',search:'🔍',lint_file:'🔎',list_dir:'📂',bash:'💻',ask_question:'❓',web_fetch:'🌐'}[name]||'');
-        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_files:'读取',apply_patch:'编辑',write_file:'写入',delete_file:'删除',mkdir:'创建目录',rename:'重命名',search:'搜索',lint_file:'检查语法',list_dir:'列出目录',bash:'执行命令',ask_question:'提问',web_fetch:'抓取网页'}[name]||name));
+        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_files:'📖',apply_patch:'✏️',write_file:'📝',create_document:'📃',edit_document:'✏️',delete_file:'🗑',mkdir:'📁',rename:'📁',search:'🔍',lint_file:'🔎',list_dir:'📂',bash:'💻',ask_question:'❓',web_fetch:'🌐',read_image:'🖼️',read_document:'📄'}[name]||'');
+        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_files:'读取',apply_patch:'编辑',write_file:'写入',create_document:'生成文档',edit_document:'编辑文档',delete_file:'删除',mkdir:'创建目录',rename:'重命名',search:'搜索',lint_file:'检查语法',list_dir:'列出目录',bash:'执行命令',ask_question:'提问',web_fetch:'抓取网页',read_image:'识别图片',read_document:'解析文档'}[name]||name));
         const pathDesc=args.path||args.paths?.join(', ')||args.command||args.question||args.url||'';
         let browserUrl='';
         if(isBrowser){if(mcpTool==='browser_navigate'){browserUrl=pathDesc;st({text:icon+' 浏览网页 '+pathDesc+'...'});}}
@@ -758,6 +803,26 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
             st({text:'✓ 编辑 '+args.path+' ('+rd.count+'处替换)',ok:true});
             return detail;
           }
+          if(name==='create_document'){
+            st({text:'📃 生成文档：'+args.path+'...',ok:false});
+            const r=await fetchTool('/create-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,content:args.content})},{signal:ac.signal});
+            if(!r.ok){st({text:'✗ 文档生成失败',err:true});return '✗ create_document: 请求失败';}
+            const rd=await r.json();const lc=(args.content||'').split('\n').length;
+            didMutate=true;
+            st({text:'✓ 已生成 '+args.path+' ('+lc+'行)',ok:true});
+            return '✓ create_document '+args.path+' ('+lc+'行)';
+          }
+          if(name==='edit_document'){
+            st({text:'✏️ 编辑文档：'+args.path+'...',ok:false});
+            const r=await fetchTool('/edit-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,oldText:args.oldText,newText:args.newText})},{signal:ac.signal});
+            if(!r.ok){st({text:'✗ 文档编辑失败',err:true});return '✗ edit_document: 请求失败';}
+            const rd=await r.json();
+            if(rd.success===false&&rd.found===false){st({text:'✗ 未找到文本',err:true});return '✗ edit_document: '+rd.message;}
+            if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ edit_document: '+rd.error;}
+            didMutate=true;
+            st({text:'✓ 已编辑 '+args.path+' ('+rd.message+')',ok:true});
+            return '✓ edit_document '+args.path+' ('+rd.message+')';
+          }
           if(name==='write_file'){
             st({text:'📝 写入中：'+args.path+'...',ok:false});
             const r=await fetchTool('/create-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,content:args.content})},{signal:ac.signal});
@@ -786,6 +851,14 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
           if(name==='lint_file'){const r=await fetchTool('/lint-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 检查语法 '+args.path,err:true});return '✗ lint_file '+args.path;}const rd=await r.json();if(rd.ok===null){st({text:'— 跳过语法检查 '+args.path+' ('+rd.output+')',ok:true});return '— lint_file '+args.path+' ('+rd.output+')';}st({text:(rd.ok?'✓ ':'✗ ')+'检查语法 '+args.path,ok:rd.ok,err:!rd.ok});return (rd.ok?'✓ ':'✗ ')+'lint_file '+args.path+' '+(rd.ok?'语法通过':'语法错误')+'\n'+(rd.output||'').substring(0,1000);}
           if(name==='list_dir'){const r=await fetchTool('/list-dir?path='+encodeURIComponent(args.path||'.'),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 列出目录 '+args.path,err:true});return '✗ list_dir '+args.path;}const rd=await r.json();st({text:'✓ 列出目录 '+(args.path||'.'),ok:true});return '✓ list_dir '+(args.path||'.')+'\n'+rd.map(e=>'  '+(e.isDir?'[dir]':'[file]')+' '+e.name+(e.isDir?'':(e.size!==undefined&&e.size!==null?' ('+fmtSize(e.size)+')':''))).join('\n');}
           if(name==='bash'){const cmdShow=args.command.replace(/\\/g,'/');const cmdExec=args.command.replace(/\//g,'\\');st({text:'💻 执行: '+cmdShow,ok:false});const r=await fetchTool('/bash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmdExec})},{timeout:200000,signal:ac.signal});if(!r.ok){st({text:'✗ 命令执行失败: '+cmdShow,err:true});return '✗ bash: 执行失败';}const rd=await r.json();const output=rd.output.substring(0,5000)+(rd.output.length>5000?'\n...(输出已截断，共'+rd.output.length+'字)':'');const ok=rd.code===0;st({text:(ok?'✓ 执行完成: ':'✗ 执行失败: ')+cmdShow+(ok?' (exit:'+rd.code+')':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' bash: exit code='+rd.code+'\n'+output;}
+                  if(name==='read_image'){
+            const vision=aiCfg.vision!==undefined?aiCfg.vision:modelSupportsVision(aiCfg.model);
+            if(!vision){
+              st({text:'⚠️ 当前模型不支持图片识别',ok:true});
+              return '⚠️ read_image 未执行：当前模型「'+(aiCfg.model||'deepseek-v4-flash')+'」是纯文本模型，不支持图片识别（视觉）。如需让茵茵识别图片，请到「配置AI」中把「模型支持图片识别」勾上，并切换到支持视觉的模型（如 GPT-4o、Gemini 2.5、含 VL 的模型等）。';
+            }
+            st({text:'🖼️ 识别图片: '+args.path,ok:false});try{const r=await fetchTool('/parse-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 图片读取失败',err:true});return '✗ read_image: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ read_image: '+rd.error;}if(rd.type==='image'){st({text:'✓ 已读取图片: '+args.path,ok:true});return '📷 图片数据: '+rd.data;}st({text:'✓ 已读取: '+args.path,ok:true});return rd.content||'(空)';}catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'⏹ 已中断',ok:true});return '✗ read_image: '+e.message;}}
+          if(name==='read_document'){st({text:'📄 解析文档: '+args.path,ok:false});try{const r=await fetchTool('/parse-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 文档解析失败',err:true});return '✗ read_document: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ read_document: '+rd.error;}st({text:'✓ 已解析: '+args.path+(rd.pages?' ('+rd.pages+'页)':''),ok:true});return (rd.content||'(空)').substring(0,5000)+(rd.content&&rd.content.length>5000?'\n...(文档较长，已截断前5000字)':'');}catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'⏹ 已中断',ok:true});return '✗ read_document: '+e.message;}}
           if(name==='ask_question'){const qid=Date.now()+'_'+Math.random().toString(36).slice(2,8);window.api?.sendToChatWindow({type:'ask-question',question:args.question,id:qid});const answer=await new Promise(r=>{_pendingQuestions[qid]={resolve:r,askedAt:Date.now()};setTimeout(()=>{if(_pendingQuestions[qid]){const cb=_pendingQuestions[qid];delete _pendingQuestions[qid];cb.resolve('(超时未回复)');}},120000);});st({text:'❓ 主人回答: '+answer,ok:true});return '用户回答: '+answer;}
           if(name==='web_fetch'){
             st({text:'🌐 抓取网页: '+args.url,ok:true});
@@ -806,9 +879,9 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
               else if(truncated)full+='\\n⚠️ 网页内容较长，仅展示前 '+(MAX_PAGES*PAGE)+' 字，更后面的内容可再次抓取获取';
               st({text:'✓ 已获取 '+args.url+(truncated?'（已自动翻页）':'')+(full.length>HARD_CAP?'（截断）':''),ok:true});
               return full||'(空内容)';
-            }catch(e){st({text:'✗ 抓取异常',err:true});return '✗ web_fetch: '+e.message;}
+            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 抓取异常',err:true});return '✗ web_fetch: '+e.message;}
           }
-          if(name==='edit_lines'){st({text:'✏️ 编辑行 '+args.path+' L'+args.startLine+(args.endLine?('-'+args.endLine):'')+'...',ok:false});try{const r=await fetchTool('/edit-lines',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,startLine:args.startLine,endLine:args.endLine,newText:args.newText})},{signal:ac.signal});if(!r.ok){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: '+rd.error;}didMutate=true;const pv=args.newText||'';let d='✓ edit_lines '+args.path+' (替换了'+(rd.replaced||0)+'行)';if(pv.length>800)d+='\n'+pv.substring(0,800)+'\n...(剩余省略)';else if(pv.length>0)d+='\n'+pv;if(d.length>2000)d=d.substring(0,2000)+'\n...(已截断)';st({text:'✓ 编辑行 '+args.path+' ('+(rd.replaced||0)+'行)',ok:true});return d;}catch(e){st({text:'✗ 编辑行异常',err:true});return '✗ edit_lines: '+e.message;}}
+          if(name==='edit_lines'){st({text:'✏️ 编辑行 '+args.path+' L'+args.startLine+(args.endLine?('-'+args.endLine):'')+'...',ok:false});try{const r=await fetchTool('/edit-lines',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,startLine:args.startLine,endLine:args.endLine,newText:args.newText})},{signal:ac.signal});if(!r.ok){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: '+rd.error;}didMutate=true;const pv=args.newText||'';let d='✓ edit_lines '+args.path+' (替换了'+(rd.replaced||0)+'行)';if(pv.length>800)d+='\n'+pv.substring(0,800)+'\n...(剩余省略)';else if(pv.length>0)d+='\n'+pv;if(d.length>2000)d=d.substring(0,2000)+'\n...(已截断)';st({text:'✓ 编辑行 '+args.path+' ('+(rd.replaced||0)+'行)',ok:true});return d;}catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'⏹ 已中断',ok:true});return '✗ edit_lines: '+e.message;}}
           st({text:icon+' 未知工具: '+name,err:true});return name+': 未知工具';
         }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:icon+' '+label+' 异常',err:true});return name+': 执行异常 '+e.message;}
       }
@@ -975,6 +1048,9 @@ async function loadAllConfigs(){
   aiCfg=ai||{};
   if(!aiCfg.url)aiCfg.url='https://api.deepseek.com/v1';
   if(!aiCfg.model)aiCfg.model='deepseek-v4-flash';
+  // 视觉能力：以已保存的 vision 为准，否则按模型自动判断
+  if(aiCfg.vision===undefined)aiCfg.vision=modelSupportsVision(aiCfg.model);
+  if(aiCfg.thinking===undefined)aiCfg.thinking=modelSupportsThinking(aiCfg.model);
   // 上下文窗口值：0 和 undefined 都会触发 fallback
   // 加载语音配置
   if(voice)voiceEnabled=voice.enabled===true;
@@ -1137,6 +1213,7 @@ async function generateGreeting(){
   let ac=new AbortController(),t;
   const abortAi=()=>{if(ac)ac.abort();clearTimeout(t);fetch('/bash-abort',{method:'POST'}).catch(()=>{});};
   const unsub=window.api?.onAiAbort(abortAi);
+  _abortChatFn=abortAi;
   try{
     const ctx=await buildAiContext('startup');
     const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,projectInfoMsg:ctx.projectInfoMsg,experiencesMsg:ctx.experiencesMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
@@ -1147,7 +1224,7 @@ async function generateGreeting(){
     const text=cleanForDisplay(raw);
     return {text,raw};
   }catch(e){return null}
-  finally{aiBusy=false;unsub?.();window.api?.aiDone();}
+  finally{_abortChatFn=null;aiBusy=false;unsub?.();window.api?.aiDone();}
 }
 
 function waitModel(){

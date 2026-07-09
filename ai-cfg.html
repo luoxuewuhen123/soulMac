@@ -75,6 +75,18 @@ input:focus,select:focus{border-color:#ff6b9d}
 <input id="cfg-custom-model" placeholder="输入自定义模型名" style="display:none;margin-top:6px"/>
 <label>上下文窗口大小（tokens）</label>
 <input id="cfg-context-window" type="number" placeholder="比如 65536, 128000, 1000000" style="font-size:12px"/>
+<div id="vision-row" style="display:none">
+  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#333;font-size:13px;margin-top:12px">
+    <input id="cfg-vision" type="checkbox" style="width:auto"/> 模型支持图片识别（视觉多模态）
+  </label>
+  <div style="font-size:11px;color:#999;margin-top:2px">勾选后茵茵才能"看"图片。仅当所选模型确实支持视觉时才出现此选项；若模型不支持，请勿勾选（会报错）。</div>
+</div>
+<div id="thinking-row" style="display:none">
+  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#333;font-size:13px;margin-top:12px">
+    <input id="cfg-thinking" type="checkbox" style="width:auto"/> 开启深度思考模式（推理）
+  </label>
+  <div style="font-size:11px;color:#999;margin-top:2px">开启后茵茵回答前会先做推理，思考过程会折叠展示。仅当所选模型支持 thinking 时才出现此选项；若不支持，请勿勾选（会报错）。</div>
+</div>
 <div id="msg"></div>
 <div class="btns"><button class="save" onclick="saveCfg()">保存</button><button class="cancel" onclick="window.close()">取消</button></div>
 </div>
@@ -143,6 +155,36 @@ const MODEL_CONTEXTS={
   // 阶跃星辰 Step
   'step-2':196608,
 };
+function modelSupportsVision(model){
+  const m=(model||'').toLowerCase();
+  if(/^(gpt-4|gpt-4o|gpt-4\.1|gpt-4o-mini|o4-mini|gemini|claude|qwen-vl|qwen2?\.?5-vl|glm-4v|kimi-vl|moonshot-vl|step|yi-vl)/.test(m))return true;
+  if(/vl|vision|多模态/.test(m))return true;
+  return false;
+}
+function modelSupportsThinking(model){
+  const m=(model||'').toLowerCase();
+  if(/deepseek/.test(m))return true;            // deepseek-chat / reasoner 支持 thinking beta
+  if(/^(gpt-4o|gpt-4\.1|o1|o3|o4|gemini|claude|qwq|qwen3|glm-z1|kimi|reasoner|r1)/.test(m))return true;
+  if(/reason|think|reasoner|r1|-t1|o1|o3/.test(m))return true;
+  return false;
+}
+// 根据模型能力显示/隐藏对应选项（仅支持时才出现，避免用户误勾不支持的能力）
+function applyCapabilityVisibility(model, isCustom){
+  if(isCustom){
+    // 自定义模型：显示全部选项，让用户自行判断（按名称猜测给个默认勾选提示）
+    $('vision-row').style.display='block';
+    $('thinking-row').style.display='block';
+    $('cfg-vision').checked=modelSupportsVision(model);
+    $('cfg-thinking').checked=modelSupportsThinking(model);
+  }else{
+    // 已知模型：仅当能力支持时才显示该选项，并按检测自动勾选
+    const v=modelSupportsVision(model), t=modelSupportsThinking(model);
+    $('vision-row').style.display=v?'block':'none';
+    $('thinking-row').style.display=t?'block':'none';
+    $('cfg-vision').checked=v;
+    $('cfg-thinking').checked=t;
+  }
+}
 function onModelChange(){
   const sel=$('cfg-model');
   const customInput=$('cfg-custom-model');
@@ -150,13 +192,16 @@ function onModelChange(){
   if(sel.value==='__custom__'){
     customInput.style.display='block';
     customInput.focus();
-    // 自定义模型时不覆盖用户已填的上下文值
+    // 自定义模型时不覆盖用户已填的上下文值；显示全部能力选项让用户自行判断
+    applyCapabilityVisibility(customInput.value.trim(), true);
   }else{
     customInput.style.display='none';
     const url=MODEL_URLS[sel.value];
     if(url)$('cfg-url').value=url;
     const ctx=MODEL_CONTEXTS[sel.value];
     if(ctx)ctxInput.value=ctx;
+    // 切换已知模型时自动检测能力：仅支持的选项才显示，并按检测自动勾选
+    applyCapabilityVisibility(sel.value, false);
   }
 }
 async function loadCfg(){
@@ -170,7 +215,8 @@ async function loadCfg(){
       $('cfg-key').value=d.apiKey||'';
       const model=d.model||'deepseek-v4-flash';
       const knownModels=Object.keys(MODEL_URLS);
-      if(knownModels.includes(model)){
+      const isCustom=!knownModels.includes(model);
+      if(!isCustom){
         $('cfg-model').value=model;
         // 自动填充已知模型的上下文值
         if(MODEL_CONTEXTS[model])$('cfg-context-window').value=MODEL_CONTEXTS[model];
@@ -181,6 +227,15 @@ async function loadCfg(){
       }
       // 从配置加载（如果保存过，覆盖自动值）
       if(d.contextWindow)$('cfg-context-window').value=d.contextWindow;
+      // 视觉能力：以已保存的为准，否则按模型自动判断
+      const v=(d.vision!==undefined)?!!d.vision:modelSupportsVision(model);
+      // 思考能力：以已保存的为准，否则按模型自动判断
+      const t=(d.thinking!==undefined)?!!d.thinking:modelSupportsThinking(model);
+      // 自定义模型显示全部选项（供用户自行判断）；已知模型仅显示支持的能力项
+      applyCapabilityVisibility(model, isCustom);
+      // 已保存的值优先；但被隐藏（不支持）的项保持关闭，避免携带过期开启值
+      if($('vision-row').style.display!=='none')$('cfg-vision').checked=v;
+      if($('thinking-row').style.display!=='none')$('cfg-thinking').checked=t;
     }
   }catch(e){/* 超时或加载失败，保持默认值 */}
 }
@@ -191,7 +246,9 @@ async function saveCfg(){
   if(model==='__custom__')model=$('cfg-custom-model').value.trim();
   if(!model)model=$('cfg-model').value.trim();
   const ctx=$('cfg-context-window').value.trim();
-  const cfg={url,apiKey:key,model};
+  const vision=$('cfg-vision').checked;
+  const thinking=$('cfg-thinking').checked;
+  const cfg={url,apiKey:key,model,vision,thinking};
   if(ctx)cfg.contextWindow=parseInt(ctx,10);
   try{
     await fetch('/save-ai-cfg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
