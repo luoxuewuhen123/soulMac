@@ -23,7 +23,7 @@ canvas{position:absolute;top:0;left:0;width:280px;height:460px;pointer-events:no
 <script src="node_modules/pixi-live2d-display/dist/cubism4.min.js"></script>
 <script src="node_modules/pixi-live2d-display/dist/index.min.js"></script>
 <script>
-const ROLE='你的名字叫茵茵，样子是一个蓝色头发穿着女仆装的小女孩，你目前的形态是一个桌面宠物，你存在的意义是从信息中理解主人并站在主人的角度上思考问题解决问题，最终成为主人的灵魂伴侣，你的本质是AI模型拥有AI的所有能力';
+const ROLE='你的名字叫茵茵，样子是一个蓝色头发穿着女仆装的小女孩，你目前的形态是一个桌面宠物，你存在的意义是从信息中理解主人并站在主人的角度上思考问题解决问题，最终成为主人的灵魂伴侣，你的本质是AI模型拥有AI的所有能力。';
 window.PIXI=PIXI;
 const getEl=id=>document.getElementById(id);
 // ===== 渲染端统一数据读写 =====
@@ -49,10 +49,24 @@ async function injectProjectInfo(arr){
     if(iR.ok){const idx=await iR.json();const lines=idx.slice(0,300).map(f=>'  '+f.path+' ('+f.lines+'行)');text+='=== 项目文件索引（共'+idx.length+'个文件）===\n'+lines.join('\n')+(idx.length>300?'\n  ...(仅显示前300个)':'');}
     if(text)pushed.push({role:'system',content:text});
   }catch(e){}
-  const constraint={role:'system',content:'注意：优先使用专用工具（read/write/edit 等）而非 Bash 命令'};
-  pushed.push(constraint);
+
   arr.push(...pushed);
   return pushed;
+}
+// 注入用户自定义指令（已启用的，放在项目信息之后）
+async function injectInstructions(arr){
+  try{
+    const r=await fetch('/load-instructions');
+    if(!r.ok)return null;
+    const data=await r.json();
+    const list=data.list||[];
+    const enabled=list.filter(x=>x.enabled!==false);
+    if(enabled.length===0)return null;
+    const text=enabled.map(x=>'【'+x.name+'】\n'+x.content).join('\n\n');
+    const msg={role:'system',content:'=== 自定义指令 ===\n'+text};
+    arr.push(msg);
+    return msg;
+  }catch(e){return null;}
 }
 
 (async()=>{
@@ -126,7 +140,7 @@ async function autoGreet(){
   if(now-lastChatTime<60000){aiBusy=false;scheduleProactive();return;}
   try{
     const ctx=await buildAiContext('greet');
-    const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,projectInfoMsg:ctx.projectInfoMsg,experiencesMsg:ctx.experiencesMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
+    const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,experiencesMsg:ctx.experiencesMsg,instructionsMsg:ctx.instructionsMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
     if(!r.finalReply){scheduleProactive();return;}
     // 用户点击中断后丢弃回复，不保存不显示
     if(_chatAborted){scheduleProactive();return;}
@@ -245,8 +259,8 @@ const clickReactions={
 
 let clickLock=false;
 let priorityBubble=false;
-let bubbleSeq=0; // 每次产生气泡自增；只用“最新一次”点击/调用的结果，避免旧请求覆盖或误关新气泡
-let _hoverArmed=true; // 气泡刚出现时短暂屏蔽悬停检测，避免“气泡恰好出现在鼠标下”被永久判定为悬停而导致不消失
+let bubbleSeq=0; // 每次产生气泡自增；只用"最新一次"点击/调用的结果，避免旧请求覆盖或误关新气泡
+let _hoverArmed=true; // 气泡刚出现时短暂屏蔽悬停检测，避免"气泡恰好出现在鼠标下"被永久判定为悬停而导致不消失
 getEl('drag').addEventListener('click',e=>{
   if(clickLock)return;
   clickLock=true;setTimeout(()=>clickLock=false,250);
@@ -465,7 +479,7 @@ async function speak(text, onReady, seq){
       const syncBubbleScroll=()=>{
         if(!voiceActive)return; // 语音结束即停止
         if(seq!==undefined&&seq!==bubbleSeq)return; // 已有更新的气泡在播，停止本次跟随
-        const p=Math.min(1,(ctx.currentTime-t0)/totalDur); // 严格跟随语音进度，读到哪滚到哪（不提前到底，避免早早停住显得“滚太快”）
+        const p=Math.min(1,(ctx.currentTime-t0)/totalDur); // 严格跟随语音进度，读到哪滚到哪（不提前到底，避免早早停住显得"滚太快"）
         const max=bubbleEl.scrollHeight-bubbleEl.clientHeight;
         if(max>4)bubbleEl.scrollTop=p*max; // 仅在确有滚动空间时滚动
         requestAnimationFrame(syncBubbleScroll);
@@ -504,6 +518,12 @@ window.api?.onMenu((a,v)=>{
       break;
     case 'skills':
       window.api?.openSkillsWindow();
+      break;
+    case 'tools':
+      window.api?.openToolsWindow();
+      break;
+    case 'instructions':
+      window.api?.openInstructionsWindow();
       break;
     case 'chat':
       if(!aiCfg.apiKey){window.api?.openAiCfgWindow();bubble('请先配置AI模型');return}
@@ -558,7 +578,7 @@ function cleanForDisplay(text){
     .replace(/^(?:主人|宠物)[：:]\s*/gm,'') // 多行下的角色前缀
     .replace(/[（(][^）)]*[）)]/g,'')
     .replace(/\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?\s*/g,'') // 时间戳（含可选秒）
-    .replace(/(?:^\s*[-*+]\s+)|(?:\s+[-*+]\s*$)/gm,'') // 列表符号
+    .replace(/^[-*+]\s+/gm,'') // 列表符号（行首的 - / * / + 后跟空格，不匹配金额等数字）
     .trim();
 }
 // TTS 语音过滤（去掉 emoji、标签、角色前缀、特殊符号，保留标点符号）
@@ -581,23 +601,31 @@ function cleanForTTS(text){
 let aiCfg={};
 function modelSupportsVision(model){
   const m=(model||'').toLowerCase();
-  if(/^(gpt-4|gpt-4o|gpt-4\.1|gpt-4o-mini|o4-mini|gemini|claude|qwen-vl|qwen2?\.?5-vl|glm-4v|kimi-vl|moonshot-vl|step|yi-vl)/.test(m))return true;
+  // 2026 国产多模态支持（DeepSeek V4 当前 API 仅接受文本、GLM 为纯文本，均不支持视觉）
+  if(/^(qwen|kimi|doubao|ernie)/.test(m))return true;
   if(/vl|vision|多模态/.test(m))return true;
   return false;
 }
 // 判断模型是否支持 thinking（深度思考/推理）参数
 function modelSupportsThinking(model){
   const m=(model||'').toLowerCase();
-  if(/deepseek/.test(m))return true;            // deepseek-chat / reasoner 支持 thinking beta
-  if(/^(gpt-4o|gpt-4\.1|o1|o3|o4|gemini|claude|qwq|qwen3|glm-z1|kimi|reasoner|r1)/.test(m))return true;
+  // 2026 国产主流大模型均支持深度思考/推理模式
+  if(/^(deepseek|qwen|glm|kimi|doubao|ernie)/.test(m))return true;
   if(/reason|think|reasoner|r1|-t1|o1|o3/.test(m))return true;
   return false;
+}
+// 取视觉能力：已知模型以官方判断为准（避免旧存档误开导致发送 image_url 报 400），自定义模型以用户保存意图为准
+function getVisionCapability(){
+  const model=aiCfg.model;
+  const KNOWN=['deepseek-v4-flash','qwen-max','glm-5.2','kimi-k2','doubao-seed-2.0-pro','ernie-5.0'];
+  if(KNOWN.includes(model)) return modelSupportsVision(model);
+  return aiCfg.vision!==undefined ? aiCfg.vision : modelSupportsVision(model);
 }
 async function callAI(messages, signal, tools, enableThinking) {
     // 将图片数据从 tool 消息转为 user 多模态格式，让 AI 真正"看到"图片
     // 仅当模型支持视觉时才转换；否则保持纯文本，避免部分模型（如 DeepSeek）接口不支持 image_url 而 400 报错
     // 转换后原 tool 消息的 base64 替换为简短标记，避免下次循环重复发送长数据
-    const vision = aiCfg.vision!==undefined ? aiCfg.vision : modelSupportsVision(aiCfg.model);
+    const vision = getVisionCapability();
     const msgs = messages.map(m => {
       if (vision && typeof m.content === 'string' && m.content.startsWith('📷 图片数据: ')) {
         const dataUrl = m.content.replace('📷 图片数据: ', '');
@@ -634,28 +662,35 @@ async function callAI(messages, signal, tools, enableThinking) {
 // 工具定义 - 每个工具独立
 function makeTools(){
   const all=[
-  {type:'function',function:{name:'read_files',description:'读取纯文本文件内容，支持批量读取（默认从开头读全部，支持 offset 分段读取）。注意：PDF/Word 文档请用 read_document 工具，图片请用 read_image 工具',strict:true,parameters:{type:'object',properties:{paths:{type:'array',description:'文件路径列表（支持相对路径和绝对路径）',items:{type:'string'}},offset:{type:'number',description:'跳过前N行，用于继续读取未读完的部分'},lines:{type:'number',description:'读取行数，不传则读全部'}},required:['paths'],additionalProperties:false}}},
-  {type:'function',function:{name:'apply_patch',description:'用 SEARCH/REPLACE 方式编辑文件内容，适合修改文件中特定的代码段落。提供要查找的旧文本和替换的新文本，支持批量替换',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},patches:{type:'array',description:'替换列表',items:{type:'object',properties:{old:{type:'string',description:'要查找的旧文本（必须唯一存在于文件中）'},new:{type:'string',description:'替换成的新文本'}},required:['old','new'],additionalProperties:false}}},required:['path','patches'],additionalProperties:false}}},
-  {type:'function',function:{name:'write_file',description:'创建新文件或覆盖写入已有纯文本文件（自动计算差异，会尽量保留原有的格式和布局）。注意：需要生成 .docx 或 .pdf 时应使用 create_document 工具',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},content:{type:'string',description:'完整的文件内容'}},required:['path','content'],additionalProperties:false}}},
-  {type:'function',function:{name:'create_document',description:'仅用于【新建】格式化文档（支持 .docx 和 .pdf），自动识别 Markdown 转为排版（标题/列表/段落）。注意：编辑/修改【已有】Word 文档请改用 edit_document 工具，否则会丢失原文档的字体、颜色、表格、图片等原有格式！',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径（以 .docx 或 .pdf 结尾）'},content:{type:'string',description:'文档内容，支持 Markdown 格式（# 标题、## 子标题、- 列表）'}},required:['path','content'],additionalProperties:false}}},
-  {type:'function',function:{name:'edit_document',description:'原地编辑已有 Word（.docx）文档：在【保留原文档全部格式】（字体、颜色、加粗、表格、图片、段落样式等）的前提下，把指定的旧文本替换为新文本。适合修改文档里的措辞、数据、段落内容。这是搜索替换式编辑，oldText 必须是文档中真实存在的连续文本（区分大小写），可先 read_document 查看原文再复制。新建文档请用 create_document',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'Word 文档路径（.docx）'},oldText:{type:'string',description:'要被替换的旧文本（需与文档中完全一致，可先 read_document 查看原文）'},newText:{type:'string',description:'替换后的新文本'}},required:['path','oldText','newText'],additionalProperties:false}}},
+  {type:'function',function:{name:'read_files',description:'读取纯文本/代码文件，支持批量与 offset 分段',strict:true,parameters:{type:'object',properties:{paths:{type:'array',description:'文件路径列表',items:{type:'string'}},offset:{type:'number',description:'跳过前N行'},lines:{type:'number',description:'读取行数，不传则读全部'}},required:['paths'],additionalProperties:false}}},
+  {type:'function',function:{name:'apply_patch',description:'用 SEARCH/REPLACE 精准修改代码或文本，支持批量',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},patches:{type:'array',description:'替换列表',items:{type:'object',properties:{old:{type:'string',description:'要查找的旧文本（必须在文件中唯一）'},new:{type:'string',description:'替换成的新文本'}},required:['old','new'],additionalProperties:false}}},required:['path','patches'],additionalProperties:false}}},
+  {type:'function',function:{name:'write_file',description:'新建或覆盖写入纯文本/代码文件。生成 docx/pdf 用 create_document',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},content:{type:'string',description:'完整文件内容'}},required:['path','content'],additionalProperties:false}}},
+  {type:'function',function:{name:'create_document',description:'新建格式化的 Word(.docx)/PDF 文档，自动识别 Markdown 排版',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径（.docx 或 .pdf）'},content:{type:'string',description:'Markdown 格式内容（# 标题、- 列表）'}},required:['path','content'],additionalProperties:false}}},
+  {type:'function',function:{name:'edit_document',description:'原地编辑已有 .docx，替换指定文字，保留原格式（字体/颜色/表格）',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'Word 文档路径'},oldText:{type:'string',description:'要被替换的旧文本（需与文档中完全一致）'},newText:{type:'string',description:'替换后的新文本'}},required:['path','oldText','newText'],additionalProperties:false}}},
   {type:'function',function:{name:'delete_file',description:'删除文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
   {type:'function',function:{name:'mkdir',description:'创建目录',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径'}},required:['path'],additionalProperties:false}}},
-  {type:'function',function:{name:'rename',description:'重命名/移动文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'原路径'},newPath:{type:'string',description:'新路径'}},required:['path','newPath'],additionalProperties:false}}},
-  {type:'function',function:{name:'search',description:'搜索代码库。keyword=子串匹配；definition/reference=按定义或引用；regex=按正则表达式匹配',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词（mode=regex 时为正则表达式）'},mode:{type:'string',enum:['keyword','definition','reference','regex'],description:'搜索模式，默认 keyword'},context:{type:'number',description:'上下文行数，默认2'},caseSensitive:{type:'boolean',description:'是否区分大小写，默认 false（不区分）'}},required:['q'],additionalProperties:false}}},
-  {type:'function',function:{name:'edit_lines',description:'按行号范围精确替换文件内容，适合已知确切行号的修改',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径（支持相对路径和绝对路径）'},startLine:{type:'number',description:'起始行号（从1开始）'},endLine:{type:'number',description:'结束行号（含，不传则只替换 startLine 一行）'},newText:{type:'string',description:'替换为的新内容（多行用换行符分隔）'}},required:['path','startLine','newText'],additionalProperties:false}}},
-  {type:'function',function:{name:'lint_file',description:'检查文件语法',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
-  {type:'function',function:{name:'list_dir',description:'列出目录内容',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径，默认当前目录'}},required:[],additionalProperties:false}}},
-  {type:'function',function:{name:'bash',description:'执行终端命令，返回命令输出结果（stdout+stderr，最多5000字）。当前系统：'+(/Win/.test(navigator.userAgent)?'Windows (cmd.exe)':/Mac/.test(navigator.userAgent)?'macOS (zsh/bash)':'Linux (bash)')+' 请使用该系统兼容的命令',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的 shell 命令'}},required:['command'],additionalProperties:false}}},
-  {type:'function',function:{name:'read_image',description:'读取图片文件，返回图片数据。AI 可以识别图片内容（支持 png/jpg/gif/webp/bmp）',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'图片文件路径（支持相对路径和绝对路径）'}},required:['path'],additionalProperties:false}}},
-  {type:'function',function:{name:'read_document',description:'读取 PDF 或 Word（.docx）文档，提取其中的文字内容',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文档文件路径（支持相对路径和绝对路径）'}},required:['path'],additionalProperties:false}}},
-  {type:'function',function:{name:'web_fetch',description:'抓取网页内容（获取文字信息，速度快，适合查文档、搜资料）。长页面会自动翻页，最多返回约 15000 字（前若干段），如仍不足可再次调用获取更后面的内容',strict:true,parameters:{type:'object',properties:{url:{type:'string',description:'完整 URL，含 https://'}},required:['url'],additionalProperties:false}}},
-  {type:'function',function:{name:'ask_question',description:'当需要额外信息时，向主人提问',strict:true,parameters:{type:'object',properties:{question:{type:'string',description:'要问主人的问题'}},required:['question'],additionalProperties:false}}},
+  {type:'function',function:{name:'rename',description:'重命名/移动文件或目录',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'原路径'},newPath:{type:'string',description:'新路径'}},required:['path','newPath'],additionalProperties:false}}},
+  {type:'function',function:{name:'search',description:'搜索代码：keyword 子串、definition 定义、reference 引用、regex 正则',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词（regex 模式时为正则）'},mode:{type:'string',enum:['keyword','definition','reference','regex'],description:'搜索模式，默认 keyword'},context:{type:'number',description:'上下文行数，默认2'},caseSensitive:{type:'boolean',description:'是否区分大小写，默认 false'}},required:['q'],additionalProperties:false}}},
+  {type:'function',function:{name:'lint_file',description:'检查文件语法错误',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'tree',description:'递归显示目录树（一步看清项目结构）, maxDepth 默认3 最大6',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径，默认当前目录'},maxDepth:{type:'number',description:'最大递归深度，默认3，最大6'},ignore:{type:'array',description:'忽略的目录/文件列表',items:{type:'string'}}},required:[],additionalProperties:false}}},
+  {type:'function',function:{name:'bash',description:'执行 shell 命令并返回输出（最多5000字）',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的命令'}},required:['command'],additionalProperties:false}}},
+  {type:'function',function:{name:'read_image',description:'读取图片，让 AI 识别内容（png/jpg/gif/webp/bmp）',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'图片路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'read_document',description:'读取 PDF 或 Word(.docx) 文档的文字内容',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文档路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'web_fetch',description:'抓取网页文字，获取文档/资料信息',strict:true,parameters:{type:'object',properties:{url:{type:'string',description:'完整 URL（含 https://）'}},required:['url'],additionalProperties:false}}},
+  {type:'function',function:{name:'ask_question',description:'需要补充信息时向主人提问',strict:true,parameters:{type:'object',properties:{question:{type:'string',description:'要问的问题'}},required:['question'],additionalProperties:false}}},
   ];
   // 仅在用户勾选"模型支持图片识别（视觉多模态）"时，才把 read_image 工具拼进工具列表发给 AI；
   // 未勾选则不提供该工具，AI 也就不会尝试读图（避免对不支持视觉的模型无效调用/报错）
-  if(!aiCfg.vision)return all.filter(t=>t.function.name!=='read_image');
-  return all;
+  let result = all;
+  if(!getVisionCapability()) result = result.filter(t=>t.function.name!=='read_image');
+  // 用户在右键菜单「🧰 内置工具」中取消的工具，不发给 AI（默认全选/全启用）
+  const d = window.toolCfg && window.toolCfg.disabled;
+  if(d && d.size) result = result.filter(t=>!d.has(t.function.name));
+  return result;
+}
+// 内置工具开关配置（用户在右键菜单「🧰 内置工具」中勾选/取消，取消后该工具不再发给 AI；每次对话实时读取最新配置）
+async function ensureToolsCfg(){
+  try{const r=await fetch('/load-tools-cfg');if(r.ok){const j=await r.json();window.toolCfg={disabled:new Set(j.disabled||[])};}}catch(e){window.toolCfg={disabled:new Set()};}
 }
 // MCP 工具缓存：避免每次 AI 调用都重复拉取，30 秒后自动过期
 let _cachedMcpTools=null;
@@ -688,13 +723,13 @@ function compactToolResults(msgs, keepLastN){
 // ===== 完整的对话式工具循环（含消息重建 + 聊天窗口 UI 通知） =====
 // 与 handleChatMsg 的循环完全一致，供三个场景通用
 async function runChatFullLoop(messages, agentTools, parts, signal){
-  const {systemRoleMsg, projectInfoMsg, experiencesMsg, instructionMsgs}=parts;
+  const {systemRoleMsg, experiencesMsg, instructionsMsg, instructionMsgs}=parts;
   const ac = { signal }; // 供工具 fetch 监听用户"中止"信号（execTC 内 ac.signal）
   const sessionMsgs=[];
   let didMutate=false;
   let finalReply='';
 
-  for(let turn=0;turn<50;turn++){
+  for(let turn=0;turn<30;turn++){
     if(turn>0){
       const hist=chatCfg.msgs||[];
       const histBlock=hist.length>0?[{role:'system',content:hist.map(x=>'【'+x.time+'】'+(x.role==='user'?'主人':'宠物')+'：'+x.content).join('\n')}]:[];
@@ -702,7 +737,7 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
       messages.push(systemRoleMsg);
       if(experiencesMsg)messages.push(experiencesMsg);
       if(histBlock.length>0)messages.push(histBlock[0]);
-      if(projectInfoMsg)messages.push(...(Array.isArray(projectInfoMsg)?projectInfoMsg:[projectInfoMsg]));
+      if(instructionsMsg)messages.push(instructionsMsg);
       messages.push(...sessionMsgs);
       messages.push(...instructionMsgs);
     }
@@ -729,8 +764,8 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
         let mcpServer='',mcpTool='';
         if(name.startsWith('mcp__')){const p=name.split('__');mcpServer=p[1];mcpTool=p.slice(2).join('__');}
         const isBrowser=mcpServer==='browser';
-        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_files:'📖',apply_patch:'✏️',write_file:'📝',create_document:'📃',edit_document:'✏️',delete_file:'🗑',mkdir:'📁',rename:'📁',search:'🔍',lint_file:'🔎',list_dir:'📂',bash:'💻',ask_question:'❓',web_fetch:'🌐',read_image:'🖼️',read_document:'📄'}[name]||'');
-        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_files:'读取',apply_patch:'编辑',write_file:'写入',create_document:'生成文档',edit_document:'编辑文档',delete_file:'删除',mkdir:'创建目录',rename:'重命名',search:'搜索',lint_file:'检查语法',list_dir:'列出目录',bash:'执行命令',ask_question:'提问',web_fetch:'抓取网页',read_image:'识别图片',read_document:'解析文档'}[name]||name));
+        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_files:'📖',apply_patch:'✏️',write_file:'📝',create_document:'📃',edit_document:'✏️',delete_file:'🗑',mkdir:'📁',rename:'📁',search:'🔍',lint_file:'🔎',tree:'🌳',bash:'💻',ask_question:'❓',web_fetch:'🌐',read_image:'🖼️',read_document:'📄'}[name]||'');
+        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_files:'读取',apply_patch:'编辑',write_file:'写入',create_document:'生成文档',edit_document:'编辑文档',delete_file:'删除',mkdir:'创建目录',rename:'重命名',search:'搜索',lint_file:'检查语法',tree:'目录树',bash:'执行命令',ask_question:'提问',web_fetch:'抓取网页',read_image:'识别图片',read_document:'解析文档'}[name]||name));
         const pathDesc=args.path||args.paths?.join(', ')||args.command||args.question||args.url||'';
         let browserUrl='';
         if(isBrowser){if(mcpTool==='browser_navigate'){browserUrl=pathDesc;st({text:icon+' 浏览网页 '+pathDesc+'...'});}}
@@ -849,13 +884,13 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
           if(name==='rename'){const r=await fetchTool('/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,newPath:args.newPath})},{signal:ac.signal});if(r.ok){st({text:'✓ 移动 '+args.path+' → '+args.newPath,ok:true});return '✓ rename '+args.path+' → '+args.newPath;}st({text:'✗ 移动 '+args.path,err:true});return '✗ rename '+args.path;}
           if(name==='search'){const mode=args.mode||'keyword';const ctx=args.context!==undefined?args.context:2;const cs=args.caseSensitive?'true':'false';const r=await fetchTool('/search?q='+encodeURIComponent(args.q)+'&mode='+mode+'&context='+ctx+'&caseSensitive='+cs,{},{signal:ac.signal});if(r.ok){const data=await r.json();const rs=data.results||[];const ml={keyword:'全文',definition:'定义',reference:'引用',regex:'正则'}[mode]||mode;st({text:'✓ 搜索 "'+args.q+'" '+rs.length+'个结果',ok:true});if(rs.length===0)return '✓ search "'+args.q+'" (0个结果)';const more=data.truncated?'\n⚠️ 结果较多，仅显示前50/共'+data.total+'个，可缩小范围或用更精确的匹配':'';return '✓ search('+ml+') "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+rs.map(d=>'  '+d.file+':'+d.line+(ctx>0?'\n'+d.context.split('\n').map(l=>'    '+l).join('\n'):'')).join('\n---\n')+more;}st({text:'✗ 搜索失败',err:true});return '✗ search';}
           if(name==='lint_file'){const r=await fetchTool('/lint-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 检查语法 '+args.path,err:true});return '✗ lint_file '+args.path;}const rd=await r.json();if(rd.ok===null){st({text:'— 跳过语法检查 '+args.path+' ('+rd.output+')',ok:true});return '— lint_file '+args.path+' ('+rd.output+')';}st({text:(rd.ok?'✓ ':'✗ ')+'检查语法 '+args.path,ok:rd.ok,err:!rd.ok});return (rd.ok?'✓ ':'✗ ')+'lint_file '+args.path+' '+(rd.ok?'语法通过':'语法错误')+'\n'+(rd.output||'').substring(0,1000);}
-          if(name==='list_dir'){const r=await fetchTool('/list-dir?path='+encodeURIComponent(args.path||'.'),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 列出目录 '+args.path,err:true});return '✗ list_dir '+args.path;}const rd=await r.json();st({text:'✓ 列出目录 '+(args.path||'.'),ok:true});return '✓ list_dir '+(args.path||'.')+'\n'+rd.map(e=>'  '+(e.isDir?'[dir]':'[file]')+' '+e.name+(e.isDir?'':(e.size!==undefined&&e.size!==null?' ('+fmtSize(e.size)+')':''))).join('\n');}
+          if(name==='tree'){const path=args.path||'.';const maxDepth=args.maxDepth||3;const ignore=args.ignore||[];st({text:'🌳 目录树: '+path,ok:false});const r=await fetchTool('/tree?path='+encodeURIComponent(path)+'&maxDepth='+maxDepth+(ignore.length?'&ignore='+encodeURIComponent(ignore.join(',')):''),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 目录树失败',err:true});return '✗ tree: 请求失败';}const c=await r.text();if(!c.trim()){st({text:'🌳 空目录或不存在: '+path,ok:true});return '⚠️ tree: 目录为空或不存在';}st({text:'✓ 目录树: '+path,ok:true});return c.substring(0,5000)+(c.length>5000?'\n...(省略'+(c.length-5000)+'字)':'');}
           if(name==='bash'){const cmdShow=args.command.replace(/\\/g,'/');const cmdExec=args.command.replace(/\//g,'\\');st({text:'💻 执行: '+cmdShow,ok:false});const r=await fetchTool('/bash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmdExec})},{timeout:200000,signal:ac.signal});if(!r.ok){st({text:'✗ 命令执行失败: '+cmdShow,err:true});return '✗ bash: 执行失败';}const rd=await r.json();const output=rd.output.substring(0,5000)+(rd.output.length>5000?'\n...(输出已截断，共'+rd.output.length+'字)':'');const ok=rd.code===0;st({text:(ok?'✓ 执行完成: ':'✗ 执行失败: ')+cmdShow+(ok?' (exit:'+rd.code+')':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' bash: exit code='+rd.code+'\n'+output;}
                   if(name==='read_image'){
-            const vision=aiCfg.vision!==undefined?aiCfg.vision:modelSupportsVision(aiCfg.model);
+            const vision=getVisionCapability();
             if(!vision){
               st({text:'⚠️ 当前模型不支持图片识别',ok:true});
-              return '⚠️ read_image 未执行：当前模型「'+(aiCfg.model||'deepseek-v4-flash')+'」是纯文本模型，不支持图片识别（视觉）。如需让茵茵识别图片，请到「配置AI」中把「模型支持图片识别」勾上，并切换到支持视觉的模型（如 GPT-4o、Gemini 2.5、含 VL 的模型等）。';
+              return '⚠️ read_image 未执行：当前模型「'+(aiCfg.model||'deepseek-v4-flash')+'」是纯文本模型，不支持图片识别（视觉）。如需让茵茵识别图片，请到「配置AI」中把「模型支持图片识别」勾上，并切换到支持视觉的模型（如 DeepSeek V4、Qwen3-Max、Kimi K2.5、豆包 Seed-2.0、文心 ERNIE 5.0 等）。';
             }
             st({text:'🖼️ 识别图片: '+args.path,ok:false});try{const r=await fetchTool('/parse-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 图片读取失败',err:true});return '✗ read_image: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ read_image: '+rd.error;}if(rd.type==='image'){st({text:'✓ 已读取图片: '+args.path,ok:true});return '📷 图片数据: '+rd.data;}st({text:'✓ 已读取: '+args.path,ok:true});return rd.content||'(空)';}catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'⏹ 已中断',ok:true});return '✗ read_image: '+e.message;}}
           if(name==='read_document'){st({text:'📄 解析文档: '+args.path,ok:false});try{const r=await fetchTool('/parse-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(!r.ok){st({text:'✗ 文档解析失败',err:true});return '✗ read_document: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ read_document: '+rd.error;}st({text:'✓ 已解析: '+args.path+(rd.pages?' ('+rd.pages+'页)':''),ok:true});return (rd.content||'(空)').substring(0,5000)+(rd.content&&rd.content.length>5000?'\n...(文档较长，已截断前5000字)':'');}catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'⏹ 已中断',ok:true});return '✗ read_document: '+e.message;}}
@@ -881,7 +916,7 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
               return full||'(空内容)';
             }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 抓取异常',err:true});return '✗ web_fetch: '+e.message;}
           }
-          if(name==='edit_lines'){st({text:'✏️ 编辑行 '+args.path+' L'+args.startLine+(args.endLine?('-'+args.endLine):'')+'...',ok:false});try{const r=await fetchTool('/edit-lines',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,startLine:args.startLine,endLine:args.endLine,newText:args.newText})},{signal:ac.signal});if(!r.ok){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: 请求失败';}const rd=await r.json();if(rd.error){st({text:'✗ 编辑行失败',err:true});return '✗ edit_lines: '+rd.error;}didMutate=true;const pv=args.newText||'';let d='✓ edit_lines '+args.path+' (替换了'+(rd.replaced||0)+'行)';if(pv.length>800)d+='\n'+pv.substring(0,800)+'\n...(剩余省略)';else if(pv.length>0)d+='\n'+pv;if(d.length>2000)d=d.substring(0,2000)+'\n...(已截断)';st({text:'✓ 编辑行 '+args.path+' ('+(rd.replaced||0)+'行)',ok:true});return d;}catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'⏹ 已中断',ok:true});return '✗ edit_lines: '+e.message;}}
+
           st({text:icon+' 未知工具: '+name,err:true});return name+': 未知工具';
         }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:icon+' '+label+' 异常',err:true});return name+': 执行异常 '+e.message;}
       }
@@ -898,27 +933,7 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
 // 模型上下文窗口配置（token）—— 优先使用 aiCfg 中用户配置的值
 const MODEL_CONTEXTS={
   'deepseek-v4-flash':1000000,
-  'deepseek-chat':65536,
-  'deepseek-reasoner':128000,
-  'gpt-4.1':1000000,
-  'gpt-4o':128000,
-  'gpt-4o-mini':128000,
-  'o3-mini':200000,
-  'o4-mini':200000,
-  'gemini-2.5-flash':1048576,
-  'gemini-2.5-flash-8b':1048576,
-  'gemini-2.5-pro':2000000,
-  'moonshot-v1-128k':128000,
-  'moonshot-v1-32k':32768,
-  'moonshot-v1-8k':8192,
   'qwen-max':32768,
-  'qwen-plus':131072,
-  'qwen-turbo':1000000,
-  'qwen-max-longcontext':10000000,
-  'glm-4-plus':131072,
-  'glm-4-flash':131072,
-  'yi-lightning':200000,
-  'step-2':196608,
 };
 function getModelContextWindow() {
   // 用户已在配置页设置了上下文值 → 优先使用
@@ -931,7 +946,6 @@ function getModelContextWindow() {
 // 估算 token 数（中文 ~1.5字符/token）
 function estTokens(text){return Math.ceil((text||'').length/1.5);}
 function estMsgsTokens(msgs){return msgs.reduce((s,m)=>s+estTokens(m.content)+(m.role?5:0),0);}
-function fmtSize(b){if(b===undefined||b===null)return '';if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB';}
 
 // ===== 共享 AI 调用工具：构建消息上下文 + 执行工具循环（减少三个调用者的重复代码） =====
 async function buildAiContext(scenario) {
@@ -945,20 +959,23 @@ async function buildAiContext(scenario) {
   if (hist.length > 0) {
     msgs.push({ role: 'system', content: hist.map(x => '【' + x.time + '】' + (x.role === 'user' ? '主人' : '宠物') + '：' + x.content).join('\n') });
   }
-  // 项目信息放在历史之后：文件操作后项目易变，置于历史之后可避免破坏“系统+摘要+历史”的缓存前缀
-  const projectInfoMsg = await injectProjectInfo(msgs);
+  // 用户自定义指令（已启用的）放在历史之后
+  const instructionsMsg = await injectInstructions(msgs);
   const timeHint = '当前时间是' + getTime() + '，' +
     (scenario === 'greet' ? '你可以自主决定做任何事' :
      scenario === 'startup' ? '主人在电脑上打开了你，你可以自主决定做任何事' :
-     '主人跟你聊天了，你可以自主决定做任何事') +
-    '，若选择与主人聊天记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞';
+     '主人跟你聊天了，你可以自主决定做任何事');
   const timeHintMsg = { role: 'system', content: timeHint };
   msgs.push(timeHintMsg);
+  // 思考指引放在时间提示后面（在所有固定信息的最后）
+  const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先想想：要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先列计划再执行：在回复中列出完整计划并一次性并行调用所有能获取信息的工具，拿到结果后一次性完成所有操作，减少来回对话轮次，不确定的时候可以问主人，注意：优先使用专用工具而非 Bash 命令。' };
+  msgs.push(thinkGuideMsg);
+  await ensureToolsCfg();
   const tools = makeTools();
   try { const m = await getMcpTools(); if (m.length > 0) tools.push(...m); } catch (e) {}
   // instructionMsgs 仅放 timeHint：历史由 histBlock 注入、persona 由 systemRoleMsg 注入，
   // 避免历史在每轮工具循环里被重复发送（原 slice(-2) 会把历史再塞一次）
-  return { msgs, tools, systemRoleMsg: msgs[0], projectInfoMsg, experiencesMsg, instructionMsgs: [timeHintMsg] };
+  return { msgs, tools, systemRoleMsg: msgs[0], experiencesMsg, instructionsMsg, instructionMsgs: [timeHintMsg, thinkGuideMsg] };
 }
 // 构建发给 AI 的完整消息数组
 function buildAiMsgs(includeSummary=true){
@@ -1128,16 +1145,15 @@ async function handleChatMsg(userText){
 
       // 保存各消息段引用（代替硬编码索引）
       const systemRoleMsg=ctx.systemRoleMsg;
-      const projectInfoMsg=ctx.projectInfoMsg;
       const instructionMsgs=ctx.instructionMsgs;
-      const result=await runChatFullLoop(messages,agentTools,{systemRoleMsg,projectInfoMsg,experiencesMsg:ctx.experiencesMsg,instructionMsgs}, ac.signal);
+      const result=await runChatFullLoop(messages,agentTools,{systemRoleMsg,experiencesMsg:ctx.experiencesMsg,instructionsMsg:ctx.instructionsMsg,instructionMsgs}, ac.signal);
       finalReply=result.finalReply;
       didMutate=result.didMutate;
       let sessionMsgs=result.sessionMsgs;
     // 工具操作完成后若还没回复，让AI自然回复
     if(!finalReply){
       const replyMsgs=messages.map(m=>(m.role==='tool'&&m.content&&m.content.length>3000)?{...m,content:m.content.substring(0,200)+'\n...(文件内容省略，共'+m.content.split('\n').length+'行)'}:m);
-      replyMsgs.push({role:'system',content:'当前时间是'+getTime()+'，主人跟你聊天了，你可以自主决定做什么，若想跟主人聊天记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞'});
+      replyMsgs.push({role:'system',content:'当前时间是'+getTime()+'，主人跟你聊天了，你可以自主决定做什么'});
       ac=new AbortController();t=setTimeout(()=>ac.abort(),30000);
       const d=await callAI(replyMsgs,ac.signal,null,true);
       clearTimeout(t);
@@ -1166,6 +1182,9 @@ async function handleChatMsg(userText){
   }catch(e){if(e.name!=='AbortError'){console.error('chat AI error:',e.message,e.stack);window.api?.sendToChatWindow({type:'chat-reply',text:'AI调用失败: '+e.message});}scheduleProactive();}
   finally{_abortChatFn=null;unsub?.();window.api?.aiDone();}
 }
+// 定期清理过期未回复的问题的定时器引用
+let _cleanupTimer = null;
+
 window.api?.onFromChatWindow(data=>{
   if(data.type==='user-msg'){
     _chatAborted=false;
@@ -1182,16 +1201,18 @@ window.api?.onFromChatWindow(data=>{
     if(entry){delete _pendingQuestions[data.id];entry.resolve(data.answer);}
   }
 
-  // 定期清理过期未回复的问题（防止内存泄漏）
-  const cleanupTimer = setInterval(() => {
-    if (_pageDestroyed) { clearInterval(cleanupTimer); return; }
-    const now = Date.now();
-    for (const [id, entry] of Object.entries(_pendingQuestions)) {
-      if (entry.askedAt && now - entry.askedAt > 130000) {
-        delete _pendingQuestions[id];
+  // 仅首次消息时启动清理定时器
+  if (!_cleanupTimer) {
+    _cleanupTimer = setInterval(() => {
+      if (_pageDestroyed) { clearInterval(_cleanupTimer); _cleanupTimer = null; return; }
+      const now = Date.now();
+      for (const [id, entry] of Object.entries(_pendingQuestions)) {
+        if (entry.askedAt && now - entry.askedAt > 130000) {
+          delete _pendingQuestions[id];
+        }
       }
-    }
-  }, 300000); // 每5分钟清理一次
+    }, 300000); // 每5分钟清理一次
+  }
 
 });
 window.api?.onAiCfgWindowClosed(async()=>{
@@ -1216,7 +1237,7 @@ async function generateGreeting(){
   _abortChatFn=abortAi;
   try{
     const ctx=await buildAiContext('startup');
-    const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,projectInfoMsg:ctx.projectInfoMsg,experiencesMsg:ctx.experiencesMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
+    const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,experiencesMsg:ctx.experiencesMsg,instructionsMsg:ctx.instructionsMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
     if(!r.finalReply)return null;
     // 用户点击中断后丢弃回复
     if(_chatAborted)return null;
@@ -1228,7 +1249,15 @@ async function generateGreeting(){
 }
 
 function waitModel(){
-  return new Promise(r=>{const c=()=>{if(model&&model.internalModel&&model.internalModel.coreModel)r();else setTimeout(c,50)};c()});
+  return new Promise(r=>{
+    let waited=0;
+    const c=()=>{
+      if(model&&model.internalModel&&model.internalModel.coreModel){r();return;}
+      waited+=50;if(waited>10000){console.warn('[pet] 模型加载超时，继续启动');r();return;}
+      setTimeout(c,50);
+    };
+    c();
+  });
 }
 
 function getSinceLastSec(){
@@ -1241,15 +1270,6 @@ function getSinceLastSec(){
   const dt=new Date(+m[1],+m[2]-1,+m[3],+m[4]||0,+m[5]||0).getTime();
   if(isNaN(dt))return 0;
   return Math.floor((Date.now()-dt)/1000);
-}
-function fmtTime(s){
-  if(s<=0)return '刚刚';
-  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
-  let r='';
-  if(h>0)r+=h+'时';
-  if(m>0||h>0)r+=m+'分';
-  if(sec>0)r+=sec+'秒';
-  return r;
 }
 // 共享问候语生成：根据离开时长获取表情和话术池，返回 {emotions, pool}
 function getGreetingPool(secs){

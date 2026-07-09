@@ -42,14 +42,12 @@ input:focus{border-color:#ff6b9d}
 function $(id){return document.getElementById(id)}
 async function loadCfg(){
   try{
-    const ac=new AbortController();const tm=setTimeout(()=>ac.abort(),5000);
-    const r=await fetch('/load-ai-cfg',{signal:ac.signal});
-    clearTimeout(tm);
+    const r=await fetch('/load-stt-cfg');
     if(r.ok){
       const d=await r.json();
       $('cfg-stt-base').value=d.base||'';
       $('cfg-stt-key').value=d.key||'';
-      $('cfg-stt-model').value=d.model||'';
+      $('cfg-stt-model').value=d.model||'whisper-1';
       $('cfg-stt-lang').value=d.language||'';
     }
   }catch(e){/* 超时或加载失败，保持默认值 */}

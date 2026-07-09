@@ -9,7 +9,7 @@ let connectingPromise = null;
 
 function loadSkills() {
   try {
-    const raw = fs.readFileSync(path.join(storage.getBaseDir(), '.skills.json'), 'utf-8');
+    const raw = fs.readFileSync(storage.getPath('skills'), 'utf-8');
     return JSON.parse(raw).installed || {};
   } catch (e) {
     return {};

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>茵茵自定义指令</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:column;font:13px/1.5 'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif}
+#hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,#ff9ec4,#ff6b9d);color:#fff;font-weight:bold;font-size:14px;flex-shrink:0;-webkit-app-region:drag}
+#hdr .btn{display:inline-block;cursor:pointer;font-size:15px;opacity:.8;padding:0 6px;-webkit-app-region:no-drag}
+#hdr .btn:hover{opacity:1}
+#intro{display:flex;align-items:center;gap:6px;cursor:pointer;padding:9px 12px;background:#fff7fb;color:#a05a7d;font-size:12px;border-bottom:1px solid #f0e3ea;-webkit-app-region:no-drag}
+#intro .arrow{transition:transform .2s;display:inline-block;font-size:10px;color:#ff6b9d}
+#intro.open .arrow{transform:rotate(90deg)}
+#introDetail{max-height:0;overflow:hidden;background:#fff7fb;color:#a05a7d;font-size:12px;line-height:1.7;transition:max-height .25s ease;border-bottom:1px solid transparent}
+#introDetail.open{padding:9px 12px;border-bottom:1px solid #f0e3ea}
+#introDetail b{color:#ff6b9d}
+#toolbar{display:flex;padding:8px 12px;gap:6px;border-bottom:1px solid #eee;flex-shrink:0}
+#toolbar button{border:none;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px;background:#ff6b9d;color:#fff;flex-shrink:0}
+#toolbar button:hover{opacity:.9}
+#list{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.item{border-radius:12px;background:#fff;padding:12px 14px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.item-head{display:flex;align-items:center;gap:10px}
+.item-head .info{flex:1;min-width:0}
+.item-head .info .name{font-size:14px;font-weight:bold;color:#333}
+.item-head .info .preview{font-size:12px;color:#999;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-head .del{cursor:pointer;font-size:13px;color:#ccc;flex-shrink:0;padding:4px}
+.item-head .del:hover{color:#e74c3c}
+.item-body{display:none;margin-top:8px;padding-top:8px;border-top:1px solid #eee}
+.item.expanded .item-body{display:block}
+.item-body textarea{width:100%;height:80px;border:1px solid #e0e0e0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;resize:vertical;font-family:inherit;box-sizing:border-box}
+.item-body textarea:focus{border-color:#ff6b9d}
+.item-body .save-btn{margin-top:6px;border:none;border-radius:8px;padding:5px 14px;cursor:pointer;font-size:12px;background:#ff6b9d;color:#fff}
+.item-body .save-btn:hover{opacity:.9}
+.item.off{opacity:.55}
+/* 开关 */
+.switch{position:relative;width:42px;height:24px;flex-shrink:0;cursor:pointer}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:#e0e0e0;border-radius:24px;transition:.2s}
+.slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+.slider{background:#ff6b9d}
+.switch input:checked+.slider:before{transform:translateX(18px)}
+#addPanel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:340px;max-width:90%;background:#fff;border-radius:14px;padding:16px;box-shadow:0 8px 30px rgba(0,0,0,.2);z-index:10}
+#addPanel[hidden]{display:none}
+#addPanel .panel-head{display:flex;justify-content:space-between;align-items:center;font-weight:bold;color:#333;margin-bottom:10px}
+#addPanel .panel-close{cursor:pointer;opacity:.6;font-size:16px}
+#addPanel .panel-close:hover{opacity:1}
+#addPanel label{display:block;font-size:12px;color:#888;margin:8px 0 3px}
+#addPanel input,#addPanel textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;box-sizing:border-box;font-family:inherit}
+#addPanel textarea{height:80px;resize:vertical}
+#addPanel input:focus,#addPanel textarea:focus{border-color:#ff6b9d}
+#addPanel .panel-actions{display:flex;gap:8px;margin-top:14px}
+#addPanel .panel-actions button{flex:1;border:none;border-radius:8px;padding:8px;cursor:pointer;font-size:13px}
+#addPanel .btn-ok{background:#ff6b9d;color:#fff}
+#addPanel .btn-cancel{background:#f0f0f0;color:#666}
+#addPanel .err{color:#e74c3c;font-size:12px;margin-top:8px;min-height:14px}
+#empty{text-align:center;padding:40px 20px;color:#ccc;font-size:14px}
+#footer{padding:8px 12px;font-size:11px;color:#bbb;text-align:center;border-top:1px solid #eee;flex-shrink:0}
+</style></head>
+<body>
+<div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>📋 自定义指令</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
+<div id="intro" onclick="toggleIntro()">
+  <span class="arrow">▸</span>
+  <span>📋 自定义指令是你写给宠物的专属规则、知识或流程，勾上就自动注入到 AI 的上下文中（点击展开说明）</span>
+</div>
+<div id="introDetail">
+  📋 <b>自定义指令</b>相当于一段你亲自写的 system prompt，宠物每次对话都会收到。你可以用它来：<br>
+  • 写<b>代码规范</b>（"用 Vue 3 Composition API + TypeScript"）<br>
+  • 存<b>项目知识</b>（"这个项目的架构是..."）<br>
+  • 定<b>行为流程</b>（"先列计划再执行，先测试后实现"）<br>
+  每条指令独立开关，<b>勾上就生效</b>，取消勾选就不注入，无需重启。
+</div>
+<div id="toolbar">
+  <button onclick="showAddPanel()">➕ 添加指令</button>
+</div>
+<div id="list"></div>
+<div id="addPanel" hidden>
+  <div class="panel-head"><span>➕ 添加自定义指令</span><span class="panel-close" onclick="hideAddPanel()">✕</span></div>
+  <label>名称（必填）</label>
+  <input id="addName" placeholder="如 Python 规范" />
+  <label>指令内容（必填，支持多行）</label>
+  <textarea id="addContent" placeholder="写代码用 PEP8 + type hints + Google docstring&#10;函数超过 50 行必须拆分&#10;..."></textarea>
+  <div class="panel-actions">
+    <button class="btn-ok" onclick="submitAdd()">添加</button>
+    <button class="btn-cancel" onclick="hideAddPanel()">取消</button>
+  </div>
+  <div id="addErr" class="err"></div>
+</div>
+<div id="footer">改动即时保存，下次对话生效</div>
+<script>
+let data = { list: [] };
+
+async function load(){
+  try{const r=await fetch('/load-instructions');if(r.ok)data=await r.json();}catch(e){}
+  if(!data.list)data.list=[];
+  render();
+}
+
+function render(){
+  const list=document.getElementById('list');
+  list.innerHTML='';
+  if(!data.list.length){
+    list.innerHTML='<div id="empty">暂无自定义指令，点击上方「➕ 添加指令」开始</div>';
+    return;
+  }
+  for(const item of data.list){
+    const on=item.enabled!==false;
+    const div=document.createElement('div');
+    div.className='item'+(on?'':' off');
+    div.dataset.id=item.id;
+    // 头部
+    const head=document.createElement('div');head.className='item-head';
+    const info=document.createElement('div');info.className='info';
+    const name=document.createElement('div');name.className='name';name.textContent=item.name;
+    const preview=document.createElement('div');preview.className='preview';preview.textContent=item.content.replace(/\n/g,' ');
+    info.appendChild(name);info.appendChild(preview);
+    const sw=document.createElement('label');sw.className='switch';
+    const cb=document.createElement('input');cb.type='checkbox';cb.checked=on;
+    cb.addEventListener('change',()=>toggle(item.id,cb.checked));
+    const slider=document.createElement('span');slider.className='slider';
+    sw.appendChild(cb);sw.appendChild(slider);
+    const del=document.createElement('span');del.className='del';del.textContent='✕';
+    del.addEventListener('click',e=>{e.stopPropagation();deleteItem(item.id);});
+    head.appendChild(info);head.appendChild(sw);head.appendChild(del);
+    div.appendChild(head);
+    // 展开编辑区
+    const body=document.createElement('div');body.className='item-body';
+    const ta=document.createElement('textarea');ta.value=item.content;
+    const btn=document.createElement('button');btn.className='save-btn';btn.textContent='保存修改';
+    btn.addEventListener('click',()=>{item.content=ta.value;save();render();});
+    body.appendChild(ta);body.appendChild(btn);
+    div.appendChild(body);
+    // 点击头部展开/收起
+    head.addEventListener('click',e=>{if(e.target.tagName==='INPUT'||e.target.closest('.del'))return;div.classList.toggle('expanded');});
+    list.appendChild(div);
+  }
+}
+
+async function toggle(id,on){
+  const item=data.list.find(x=>x.id===id);
+  if(!item)return;
+  item.enabled=on;
+  await save();
+  render();
+}
+
+async function deleteItem(id){
+  data.list=data.list.filter(x=>x.id!==id);
+  await save();
+  render();
+}
+
+function showAddPanel(){
+  document.getElementById('addName').value='';
+  document.getElementById('addContent').value='';
+  document.getElementById('addErr').textContent='';
+  document.getElementById('addPanel').hidden=false;
+  document.getElementById('addName').focus();
+}
+
+function hideAddPanel(){
+  document.getElementById('addPanel').hidden=true;
+}
+
+async function submitAdd(){
+  const name=document.getElementById('addName').value.trim();
+  const content=document.getElementById('addContent').value.trim();
+  const err=document.getElementById('addErr');
+  if(!name){err.textContent='请输入名称';return;}
+  if(!content){err.textContent='请输入指令内容';return;}
+  const id='ins-'+Date.now().toString(36)+'-'+Math.random().toString(36).substring(2,6);
+  data.list.push({id,name,content,enabled:true});
+  await save();
+  hideAddPanel();
+  render();
+}
+
+async function save(){
+  try{
+    await fetch('/save-instructions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  }catch(e){console.error('保存自定义指令失败:',e);}
+}
+
+function toggleIntro(){const i=document.getElementById('intro'),d=document.getElementById('introDetail');if(d.classList.contains('open')){d.style.maxHeight='0px';i.classList.remove('open');d.classList.remove('open');}else{i.classList.add('open');d.classList.add('open');d.style.maxHeight=d.scrollHeight+'px';}}
+
+load();
+</script>
+</body></html>

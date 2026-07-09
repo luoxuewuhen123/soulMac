@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>茵茵技能</title>
+<html><head><meta charset="UTF-8"><title>茵茵拓展工具</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:column;font:13px/1.5 'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif}
@@ -24,12 +24,76 @@ html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:
 .skill .btn-add.loading,.skill .btn-del.loading{opacity:.6;pointer-events:none;position:relative}
 .skill .btn-add.loading::after,.skill .btn-del.loading::after{content:'⏳';margin-left:4px}
 #empty{text-align:center;padding:40px 20px;color:#ccc;font-size:14px}
+/* 搜索栏 + 自定义面板 */
+#toolbar{display:flex;gap:6px;padding:8px 12px;background:#fff;border-bottom:1px solid #eee;flex-shrink:0}
+#toolbar input{flex:1;min-width:0;border:1px solid #e0e0e0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none}
+#toolbar input:focus{border-color:#ff6b9d}
+#toolbar button{border:none;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:13px;background:#ff6b9d;color:#fff;flex-shrink:0}
+#toolbar button#customBtn{background:#f0f0f0;color:#666}
+#toolbar button:hover{opacity:.9}
+#searchResults{display:flex;flex-direction:column;gap:8px;padding:10px 12px;background:#fafafa;border-bottom:1px solid #eee}
+#searchResults:empty{display:none}
+.sr-head{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;font-weight:bold;color:#666}
+.sr-close{cursor:pointer;font-size:12px;color:#ff6b9d;font-weight:normal;padding:2px 8px;-webkit-app-region:no-drag}
+.sr-close:hover{opacity:.7}
+#customPanel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:340px;max-width:90%;background:#fff;border-radius:14px;padding:16px;box-shadow:0 8px 30px rgba(0,0,0,.2);z-index:10}
+#customPanel[hidden]{display:none}
+#customPanel .panel-head{display:flex;justify-content:space-between;align-items:center;font-weight:bold;color:#333;margin-bottom:10px}
+#customPanel .panel-close{cursor:pointer;opacity:.6;font-size:16px}
+#customPanel .panel-close:hover{opacity:1}
+#customPanel label{display:block;font-size:12px;color:#888;margin:8px 0 3px}
+#customPanel input{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;box-sizing:border-box}
+#customPanel input:focus{border-color:#ff6b9d}
+#customPanel .panel-actions{display:flex;gap:8px;margin-top:14px}
+#customPanel .panel-actions button{flex:1;border:none;border-radius:8px;padding:8px;cursor:pointer;font-size:13px}
+#customPanel .btn-ok{background:#ff6b9d;color:#fff}
+#customPanel .btn-cancel{background:#f0f0f0;color:#666}
+#customPanel .err{color:#e74c3c;font-size:12px;margin-top:8px;min-height:14px}
+.skill .name .ver{font-size:11px;color:#bbb;font-weight:normal}
+.skill .desc.err{color:#e74c3c}
+#intro{display:flex;align-items:center;gap:6px;cursor:pointer;padding:9px 12px;background:#fff7fb;color:#a05a7d;font-size:12px;border-bottom:1px solid #f0e3ea;-webkit-app-region:no-drag}
+#intro .arrow{transition:transform .2s;display:inline-block;font-size:10px;color:#ff6b9d}
+#intro.open .arrow{transform:rotate(90deg)}
+#introDetail{max-height:0;overflow:hidden;background:#fff7fb;color:#a05a7d;font-size:12px;line-height:1.7;transition:max-height .25s ease;border-bottom:1px solid transparent}
+#introDetail.open{padding:9px 12px;border-bottom:1px solid #f0e3ea}
+#introDetail b{color:#ff6b9d}
+.section-title{padding:12px 12px 2px;font-size:13px;font-weight:bold;color:#666}
 </style></head>
 <body>
-<div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>🧩 技能管理</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
+<div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>🧩 拓展工具管理</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
+<div id="toolbar">
+  <input id="searchInput" type="text" placeholder="搜索 npm 上的 MCP 拓展工具，如 github / figma / memory" />
+  <button id="searchBtn">🔍 搜索</button>
+  <button id="customBtn">➕ 自定义</button>
+</div>
+<div id="intro" onclick="toggleIntro()">
+  <span class="arrow">▸</span>
+  <span>🧩 拓展工具（MCP 服务器）能为宠物扩展新能力，按需加载、不增加常驻开销（点击展开说明）</span>
+</div>
+<div id="introDetail">
+  🧩 <b>拓展工具（MCP 服务器）</b>能为宠物扩展新能力：操作 GitHub、查询数据库、读取 PDF、控制浏览器、定时任务等。它<b>按需加载</b>——只有你添加并启用的拓展工具，才会进入宠物的工具列表，不增加常驻开销。三种方式添加：① 下方「推荐拓展工具」一键添加；② 顶部搜索框搜 npm 上任意 MCP 拓展工具；③ 点「自定义」手动填写启动命令，接入任意服务。添加后宠物会自动重连并加载该拓展工具的能力，之后直接在对话里让它用即可。
+</div>
+<div id="searchResults" hidden></div>
+<div id="listTitle" class="section-title">✨ 推荐拓展工具</div>
 <div id="list"></div>
+<div id="customPanel" hidden>
+  <div class="panel-head"><span>➕ 自定义 MCP 服务器</span><span class="panel-close" onclick="toggleCustom(false)">✕</span></div>
+  <label>名称（必填）</label>
+  <input id="cName" placeholder="如 My Tool" />
+  <label>启动命令（必填）</label>
+  <input id="cCmd" placeholder="如 npx 或 node" />
+  <label>参数（必填，空格分隔）</label>
+  <input id="cArgs" placeholder="如 -y @scope/server-name" />
+  <label>环境变量（可选，JSON）</label>
+  <input id="cEnv" placeholder='{"KEY":"VALUE"}' />
+  <div class="panel-actions">
+    <button class="btn-ok" onclick="submitCustom()">添加</button>
+    <button class="btn-cancel" onclick="toggleCustom(false)">取消</button>
+  </div>
+  <div id="customErr" class="err"></div>
+</div>
 <script>
-// ===== 预设技能商店 =====
+// ===== 预设拓展工具商店 =====
 const SKILLS = [
   {id:'browser', icon:'🌐', name:'浏览器控制', desc:'让宠物可以打开网页、截图、点击按钮、填写表单。基于 Playwright MCP', cmd:'npx', args:['-y','@playwright/mcp','--headless']},
   {id:'docs', icon:'📚', name:'文档查询', desc:'宠物可以实时查询任意开源库的最新官方文档，避免 API 幻觉。基于 Context7', cmd:'npx', args:['-y','@upstash/context7-mcp']},
@@ -57,6 +121,13 @@ const SKILLS = [
 ];
 
 let installed = {};
+
+// 预设中已知的 npm 包名 -> 预设 id，用于搜索结果去重（避免预设项与搜索卡片重复出现）
+const PRESET_PKG = {};
+for (const s of SKILLS) {
+  const yi = s.args ? s.args.indexOf('-y') : -1;
+  if (yi >= 0 && s.args[yi + 1]) PRESET_PKG[s.args[yi + 1]] = s.id;
+}
 
 async function loadSkills() {
   try{const r=await fetch('/load-skills');if(r.ok)installed=await r.json();}catch(e){}
@@ -109,15 +180,20 @@ function render() {
 async function addSkill(id) {
   const s = SKILLS.find(x => x.id === id);
   if (!s) return;
-  // 只给当前技能的按钮加 loading 状态
+  const cfg = { name: s.name, command: s.cmd, args: s.args, env: s.env };
   const btn = document.querySelector(`.skill:not(.installed) .btn-add[data-skill-id="${id}"]`);
-  if(btn)btn.classList.add('loading');
+  await addSkillByCfg(id, cfg, btn);
+}
+
+// 通用：按任意配置添加 MCP（预设 / 搜索结果 / 自定义共用）
+async function addSkillByCfg(id, cfg, btn) {
+  if (btn) btn.classList.add('loading');
   const inst = installed.installed || {};
-  inst[id] = { name: s.name, command: s.cmd, args: s.args, env: s.env };
+  inst[id] = cfg;
   installed.installed = inst;
   try {
     await fetch('/save-skills', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(installed)});
-    await fetch('/mcp-add-skill', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, cfg: inst[id]})});
+    await fetch('/mcp-add-skill', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, cfg})});
   } catch(e) {
     // 增量添加失败时回退到全量重载
     try { await fetch('/mcp-reload', {method:'POST'}); } catch(e2) {}
@@ -142,6 +218,79 @@ async function removeSkill(id) {
 }
 
 function $(id){return document.getElementById(id)}
+
+// ===== npm 搜索 / 自定义添加 =====
+function sanitizeId(str){return String(str).replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+// 搜索 npm 上的 MCP 拓展工具（不限于预设清单）
+function doSearch(){
+  const q=document.getElementById('searchInput').value.trim();
+  const box=document.getElementById('searchResults');
+  box.hidden=false; box.innerHTML='<div class="sr-head"><span>🔍 搜索中...</span><span class="sr-close" onclick="clearSearch()">✕ 收起</span></div>';
+  fetch('/search-mcp?q='+encodeURIComponent(q)).then(r=>r.json()).then(items=>{
+    if(items.error){box.innerHTML='<div class="sr-head"><span>搜索失败</span><span class="sr-close" onclick="clearSearch()">✕ 收起</span></div><div class="skill"><div class="info"><div class="desc err">'+escapeHtml(items.error)+'</div></div></div>';return;}
+    if(!items.length){box.innerHTML='<div class="sr-head"><span>未找到匹配的 MCP 拓展工具</span><span class="sr-close" onclick="clearSearch()">✕ 收起</span></div>';return;}
+    box.innerHTML='<div class="sr-head"><span>🔍 搜索结果</span><span class="sr-close" onclick="clearSearch()">✕ 收起</span></div>';
+    const hd=document.createElement('div');hd.className='section-title';hd.textContent='🔍 搜索结果';box.appendChild(hd);
+    const inst=installed.installed||{};
+    items.forEach(p=>{
+      let inPreset=false,presetId=PRESET_PKG[p.name];
+      if(presetId){
+        inPreset=true;
+        const instCfg=inst[presetId];
+        if(!instCfg){
+          // 该包有预设但未安装，允许用户通过搜索结果安装（自动绑定到预设 id）
+          presetId=null;
+          inPreset=false;
+        }
+      }
+      if(inPreset) return; // 已安装的预设包，跳过以免显示重复搜索卡片
+      const actualId=presetId||'npm-'+sanitizeId(p.name);
+      const isInst=!!inst[actualId];
+      const div=document.createElement('div');div.className='skill'+(isInst?' installed':'');
+      div.innerHTML='<div class="icon">📦</div><div class="info"><div class="name">'+escapeHtml(p.name)+' <span class="ver">v'+escapeHtml(p.version||'')+'</span></div><div class="desc">'+escapeHtml(p.description||'')+'</div></div>';
+      const addBtn=document.createElement('button');addBtn.className='btn-add';addBtn.textContent='+ 添加';
+      addBtn.onclick=()=>{const cfg={name:p.name,command:'npx',args:['-y',p.name]};addSkillByCfg(actualId,cfg,addBtn).then(()=>{addBtn.textContent='✓ 已添加';addBtn.disabled=true;div.classList.add('installed');});};
+      const delBtn=document.createElement('button');delBtn.className='btn-del';delBtn.textContent='✕ 卸载';
+      delBtn.onclick=()=>removeSkill(actualId);
+      div.appendChild(addBtn);div.appendChild(delBtn);
+      box.appendChild(div);
+    });
+  }).catch(e=>{box.innerHTML='<div class="sr-head"><span>搜索失败</span><span class="sr-close" onclick="clearSearch()">✕ 收起</span></div><div class="skill"><div class="info"><div class="desc err">'+escapeHtml(e.message)+'</div></div></div>';});
+}
+
+function toggleCustom(show){
+  const p=document.getElementById('customPanel');
+  if(show===undefined)p.hidden=!p.hidden; else p.hidden=!show;
+  if(p.hidden)document.getElementById('customErr').textContent='';
+}
+
+// 自定义 MCP：用户手填命令/参数，可接任何 npx / 本地 / 远程服务
+function submitCustom(){
+  const name=document.getElementById('cName').value.trim();
+  const cmd=document.getElementById('cCmd').value.trim();
+  const argsRaw=document.getElementById('cArgs').value.trim();
+  const envRaw=document.getElementById('cEnv').value.trim();
+  const err=document.getElementById('customErr');
+  if(!name||!cmd||!argsRaw){err.textContent='名称、启动命令、参数均为必填';return;}
+  const args=argsRaw.split(/\s+/).filter(Boolean);
+  let env;
+  if(envRaw){try{env=JSON.parse(envRaw);if(typeof env!=='object'||env===null||Array.isArray(env))throw new Error('env 必须是 JSON 对象');}catch(e){err.textContent='环境变量 JSON 格式错误: '+e.message;return;}}
+  const id='custom-'+sanitizeId(name)+'-'+Date.now().toString(36);
+  const cfg={name,command:cmd,args};if(env)cfg.env=env;
+  addSkillByCfg(id,cfg,null).then(()=>{
+    toggleCustom(false);
+    document.getElementById('cName').value='';document.getElementById('cCmd').value='';document.getElementById('cArgs').value='';document.getElementById('cEnv').value='';
+  });
+}
+
+document.getElementById('searchBtn').addEventListener('click',doSearch);
+document.getElementById('searchInput').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch();});
+document.getElementById('customBtn').addEventListener('click',()=>toggleCustom(true));
+
+function toggleIntro(){const i=document.getElementById('intro'),d=document.getElementById('introDetail');if(d.classList.contains('open')){d.style.maxHeight='0px';i.classList.remove('open');d.classList.remove('open');}else{i.classList.add('open');d.classList.add('open');d.style.maxHeight=d.scrollHeight+'px';}}
+function clearSearch(){const box=document.getElementById('searchResults');box.hidden=true;box.innerHTML='';}
 loadSkills();
 </script>
 </body>

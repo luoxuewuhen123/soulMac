@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('api', {
   openAiCfgWindow: () => ipcRenderer.send('open-ai-cfg-window'),
   openSttCfgWindow: () => ipcRenderer.send('open-stt-cfg-window'),
   openSkillsWindow: () => ipcRenderer.send('open-skills-window'),
+  openToolsWindow: () => ipcRenderer.send('open-tools-window'),
+  openInstructionsWindow: () => ipcRenderer.send('open-instructions-window'),
   togglePin: () => ipcRenderer.send('toggle-pin'),
   minimizeWindow: () => ipcRenderer.send('minimize-window'),
   openDevtools: () => ipcRenderer.send('open-devtools'),

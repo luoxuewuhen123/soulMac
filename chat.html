@@ -354,7 +354,9 @@ function cancelAi(){
   _cancelLatch=true;
   window.api?.sendToPetWindow({type:'cancel-ai'});
   // 立即清除 UI（回复即使已到达也被丢弃）
-  $('msgs').removeChild(pendingReply.div);
+  if(pendingReply.div && pendingReply.div.parentNode){
+    try{pendingReply.div.parentNode.removeChild(pendingReply.div)}catch(e){}
+  }
   resetSendBtn();
   if(pendingReply.inp)pendingReply.inp.disabled=false;
   pendingReply=null;
@@ -501,7 +503,7 @@ window.api?.onFromPetWindow(data=>{
 
 // 聊天窗口关闭时，通知宠物窗口停止当前 AI 处理
 window.addEventListener('beforeunload',()=>{
-  if(pendingReply)window.api?.sendToPetWindow({type:'cancel-ai'});
+  if(pendingReply){_cancelLatch=true;window.api?.sendToPetWindow({type:'cancel-ai'});}
   pendingReply=null;
 });
 window.api?.onAiCfgWindowClosed(async()=>{

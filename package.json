@@ -63,7 +63,9 @@
     "asar": true,
     "asarUnpack": [
       "tts-worker.js",
-      "node_modules/edge-tts-universal/**"
+      "node_modules/edge-tts-universal/**",
+      "node_modules/pdf-parse/**",
+      "node_modules/koffi/**"
     ],
     "npmRebuild": false,
     "files": [

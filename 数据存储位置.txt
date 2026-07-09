@@ -6,4 +6,6 @@ AI 模型配置	.ai-cfg.json
 聊天摘要    	.experiences.json  
 宠物装饰    	.deco.json
 语音开关状态	.voice.json
-技能配置    	.skills.json（在技能管理页面添加/卸载，也可手动编辑）
+拓展工具         .skills.json（在插件管理页面添加/卸载，也可手动编辑）
+内置工具         .tools.json
+自定义指令      .instructions.json

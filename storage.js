@@ -10,8 +10,6 @@ function init(userDataPath) {
   try { fs.mkdirSync(baseDir, { recursive: true }); } catch(e) { console.error('[storage] 创建目录失败:', baseDir, e.message); }
 }
 
-function getBaseDir() { return baseDir; }
-
 // ===== 文件路径映射 =====
 const files = {
   deco:          '.deco.json',
@@ -23,6 +21,8 @@ const files = {
   'stt-cfg':     '.stt-cfg.json',
   experiences:   '.experiences.json',
   skills:        '.skills.json',
+  tools:         '.tools.json',
+  instructions:  '.instructions.json',
 };
 
 // ===== 各文件默认值（文件不存在时返回） =====
@@ -36,6 +36,8 @@ const defaults = {
   'stt-cfg':     '{}',
   experiences:   '[]',
   skills:        '{}',
+  tools:         '{"disabled":[]}',
+  instructions:  '{"list":[]}',
 };
 
 // ===== 串行写入队列 =====
@@ -109,4 +111,4 @@ function saveData(name, data) {
   });
 }
 
-module.exports = { save, load, loadData, saveData, init, getBaseDir };
+module.exports = { save, load, loadData, saveData, init, getPath };

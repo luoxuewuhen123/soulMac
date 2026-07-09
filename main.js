@@ -1,10 +1,3 @@
-// 确保 crypto.subtle 可用（某些 Electron/Node 环境下缺失）
-const nodeCrypto = require('crypto');
-if (nodeCrypto.webcrypto && nodeCrypto.webcrypto.subtle && (!globalThis.crypto || !globalThis.crypto.subtle)) {
-  if (!globalThis.crypto) globalThis.crypto = nodeCrypto.webcrypto;
-  else globalThis.crypto.subtle = nodeCrypto.webcrypto.subtle;
-}
-
 const { app, BrowserWindow, ipcMain, Menu, screen, dialog } = require('electron');
 
 // 单实例锁：禁止重复启动
@@ -36,9 +29,12 @@ const mcp = require('./mcp');
 const ttsCache = new Map();
 const TTS_CACHE_MAX = 80;
 
+// npm MCP 拓展工具搜索结果缓存（避免重复请求 registry）
+const _mcpSearchCache = { ts: 0, key: '', data: null };
+
 const MIME_MAP = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.json': 'application/json', '.png': 'image/png', '.moc3': 'application/octet-stream', '.zip': 'application/zip' };
 
-let mainWindow, server, chatWindow, aiCfgWindow, skillsWindow, sttCfgWindow;
+let mainWindow, server, chatWindow, aiCfgWindow, skillsWindow, sttCfgWindow, toolsWindow, instructionsWindow;
 let _windowOnTop = true; // 跟踪窗口期望的置顶状态
 
 function readBody(req) {
@@ -56,7 +52,7 @@ function readBody(req) {
 function ok(res) { res.writeHead(200); res.end('ok'); }
 
 // ===== 数据读写路由（从 handler 映射表自动生成） =====
-const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','stt-cfg','experiences','skills'];
+const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','stt-cfg','experiences','skills','instructions'];
 const dataHandlers = {};
 DATA_NAMES.forEach(n => {
   dataHandlers['POST /save-'+n] = (req, res) => readBody(req).then(b => storage.save(n, b, () => ok(res)));
@@ -149,8 +145,10 @@ function xmlTextReplace(xml, oldText, newText) {
   return { found: true, occurrences, result };
 }
 
-// 当前正在执行的 bash 子进程引用，供“中断”按钮通过 /bash-abort 真正终止后台进程
+// 当前正在执行的 bash 子进程引用集合，供"中断"按钮通过 /bash-abort 真正终止后台进程
 let currentBashChild = null;
+// 并行 bash 进程的完整集合（防止中断遗漏）
+const _bashChildren = new Set();
 
 function startServer() {
   return new Promise(r => {
@@ -160,8 +158,9 @@ function startServer() {
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('Expires', '0');
-      // 数据读写处理
-      const h = dataHandlers[req.method + ' ' + req.url];
+      // 数据读写处理（去除查询参数再匹配）
+      const pathOnly = req.url.split('?')[0];
+      const h = dataHandlers[req.method + ' ' + pathOnly];
       if (h) { h(req, res); return; }
 
       // 文件读取（支持相对路径）
@@ -319,6 +318,46 @@ function startServer() {
         }
         return;
       }
+      // 递归目录树（一次看清项目骨架，避免逐层 list_dir 的多轮循环）
+      if (req.method === 'GET' && req.url.startsWith('/tree?path=')) {
+        const u = new URL(req.url, 'http://localhost');
+        let fp = decodeURIComponent(u.searchParams.get('path') || '') || '.';
+        const maxDepth = Math.min(parseInt(u.searchParams.get('maxDepth') || '3', 10) || 3, 6);
+        const ignore = new Set((u.searchParams.get('ignore') || '').split(',').map(s => s.trim()).filter(Boolean));
+        const DEFAULT_IGNORE = new Set(['node_modules', '.git', '.codebuddy', '.idea', '.vscode', 'dist', 'build']);
+        const resolved = safePath(fp);
+        if (!resolved) { res.writeHead(403); res.end('# 禁止访问的路径'); return; }
+        const lines = [];
+        let count = 0; const HARD_CAP = 600;
+        function walk(dir, depth, prefix) {
+          if (depth > maxDepth || count > HARD_CAP) return;
+          let entries;
+          try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+          entries = entries.filter(e => {
+            if (e.name.startsWith('.')) return false;
+            if (DEFAULT_IGNORE.has(e.name) || ignore.has(e.name)) return false;
+            return true;
+          });
+          entries.sort((a, b) => (a.isDirectory() === b.isDirectory()) ? a.name.localeCompare(b.name) : (a.isDirectory() ? -1 : 1));
+          entries.forEach((e, i) => {
+            if (count > HARD_CAP) return;
+            const isLast = i === entries.length - 1;
+            lines.push(prefix + (isLast ? '└── ' : '├── ') + e.name + (e.isDirectory() ? '/' : ''));
+            count++;
+            if (e.isDirectory()) walk(path.join(dir, e.name), depth + 1, prefix + (isLast ? '    ' : '│   '));
+          });
+        }
+        try {
+          lines.push(path.basename(resolved) + '/');
+          walk(resolved, 1, '');
+          if (count > HARD_CAP) lines.push('... (已达到显示上限 ' + HARD_CAP + ' 项，更深层请用更小的 maxDepth 或 list_dir 查看具体目录)');
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(lines.join('\n'));
+        } catch (e) {
+          res.writeHead(500); res.end('# 读取失败: ' + e.message);
+        }
+        return;
+      }
       // TTS（通过系统 Node.js 子进程调用 Edge TTS，避免 Electron 兼容问题）
       if (req.method === 'POST' && req.url.startsWith('/tts')) {
         readBody(req).then(raw => {
@@ -402,17 +441,27 @@ function startServer() {
             const child = isWin
               ? exec(command, { cwd: __dirname, timeout: 180000, maxBuffer: 1024*1024, shell: true }, cb)
               : execFile('/bin/sh', ['-c', command], { cwd: __dirname, timeout: 180000, maxBuffer: 1024*1024 }, cb);
+            // 确保子进程退出时清理引用，包括超时/崩溃等非正常退出场景
+            _bashChildren.add(child);
+            const cleanupChild = () => { _bashChildren.delete(child); if (currentBashChild === child) currentBashChild = null; };
+            child.on('exit', cleanupChild);
+            child.on('error', cleanupChild);
             currentBashChild = child;
           } catch(e) { res.writeHead(400); res.end('{"error":"invalid json"}'); }
         });
         return;
       }
-      // 中断当前正在执行的 bash 命令（供前端“中断”按钮调用，真正终止后台子进程）
+      // 中断当前正在执行的 bash 命令（供前端"中断"按钮调用，真正终止后台子进程）
       if (req.method === 'POST' && req.url === '/bash-abort') {
         if (currentBashChild) {
           try { currentBashChild.kill('SIGTERM'); } catch (e) {}
           currentBashChild = null;
         }
+        // 杀死所有正在运行的 bash 子进程（含并行）
+        for (const child of _bashChildren) {
+          try { child.kill('SIGTERM'); } catch (e) {}
+        }
+        _bashChildren.clear();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -462,47 +511,7 @@ function startServer() {
         });
         return;
       }
-      // 行级文件编辑（diff风格，按行号替换）
-      if (req.method === 'POST' && req.url === '/edit-lines') {
-        readBody(req).then(body => {
-          try {
-            const raw = JSON.parse(body);
-            // 兼容 AI 可能使用的不同字段名
-            const fp = raw.path;
-            const startLine = raw.startLine !== undefined ? Number(raw.startLine) : (raw.start !== undefined ? Number(raw.start) : undefined);
-            const endLine = raw.endLine !== undefined ? Number(raw.endLine) : (raw.end !== undefined ? Number(raw.end) : undefined);
-            const newText = raw.newText !== undefined ? String(raw.newText) : (raw.content !== undefined ? String(raw.content) : undefined);
-            console.log('[edit-lines] 原始请求:', JSON.stringify(raw));
-            console.log('[edit-lines] 解析后:', { fp, startLine, endLine, newText });
-            if (!fp || isNaN(startLine) || newText === undefined) {
-              res.writeHead(400);
-              res.end(JSON.stringify({ error: 'missing params', need: ['path', 'startLine', 'newText'], received: { path: fp, startLine, endLine, hasNewText: newText !== undefined } }));
-              return;
-            }
-            let filePath = fp;
-            if (!path.isAbsolute(filePath)) filePath = path.join(__dirname, filePath);
-            const resolved = safePath(filePath);
-            if (!resolved) { res.writeHead(403); res.end('{"error":"forbidden path"}'); return; }
-            fs.readFile(resolved, 'utf-8', (e, content) => {
-              if (e) { res.writeHead(404); res.end('{"error":"文件不存在或无法读取"}'); return; }
-              const lines = content.split('\n');
-              const s = Math.max(0, startLine - 1); // 转为0-based
-              const ee = !isNaN(endLine) ? Math.min(lines.length, endLine) : (s + 1); // 默认替换1行
-              lines.splice(s, ee - s, ...newText.split('\n'));
-              fs.writeFile(resolved, lines.join('\n'), 'utf-8', (we) => {
-                if (we) { res.writeHead(500); res.end('{"error":"写入失败"}'); return; }
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: true, replaced: ee - s, lines: lines.length }));
-              });
-            });
-          } catch(e) {
-            console.error('[edit-lines] 解析失败:', e.message);
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'invalid json', detail: e.message }));
-          }
-        });
-        return;
-      }
+
       // 创建文件（覆盖写入，若文件已存在则计算行级差异）
       if (req.method === 'POST' && req.url === '/create-file') {
         readBody(req).then(body => {
@@ -758,14 +767,11 @@ function startServer() {
           else cb(null,'语法正确');
         }catch(e){cb(e,e.message);}
       }
-      const hasTsc = (() => { try { require('child_process').execFileSync('tsc', ['--version'], { timeout: 5000, stdio: 'ignore' }); return true; } catch(e) { return false; } })();
       const lintChecks = {
         '.js': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
         '.jsx': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
         '.mjs': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
         '.cjs': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
-        '.ts': (fp, cb) => hasTsc ? execFile('tsc', ['--noEmit','--skipLibCheck','--target','ES2020', fp], { timeout: 30000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim() || '语法正确')) : cb(null,'跳过：未检测到 TypeScript 编译器 (tsc)'),
-        '.tsx': (fp, cb) => hasTsc ? execFile('tsc', ['--noEmit','--skipLibCheck','--target','ES2020', fp], { timeout: 30000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim() || '语法正确')) : cb(null,'跳过：未检测到 TypeScript 编译器 (tsc)'),
         '.py': (fp, cb) => execFile('python', ['-m', 'py_compile', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
         '.json': jsonLint,
         '.html': htmlLint,
@@ -944,7 +950,92 @@ function startServer() {
         }).catch(e => { res.writeHead(500); res.end(JSON.stringify({error: e.message})); });
         return;
       }
-      let fn = req.url === '/' ? '/index.html' : decodeURIComponent(req.url);
+      // 搜索 npm 上的 MCP 拓展工具（用户可发现官方清单之外的任意拓展工具），带 30s 缓存
+      if (req.method === 'GET' && req.url.startsWith('/search-mcp?')) {
+        const u = new URL(req.url, 'http://localhost');
+        const q = (u.searchParams.get('q') || '').trim() || 'mcp';
+        const now = Date.now();
+        if (_mcpSearchCache.data && _mcpSearchCache.key === q && now - _mcpSearchCache.ts < 30000) {
+          res.writeHead(200, {'Content-Type':'application/json'});
+          res.end(JSON.stringify(_mcpSearchCache.data));
+          return;
+        }
+        const apiUrl = 'https://registry.npmjs.org/-/v1/search?text=' + encodeURIComponent(q + ' mcp') + '&size=25';
+        https.get(apiUrl, resp => {
+          let buf = '';
+          resp.on('data', d => buf += d);
+          resp.on('end', () => {
+            try {
+              const json = JSON.parse(buf);
+              const items = (json.objects || []).map(o => ({
+                name: o.package.name,
+                version: o.package.version,
+                description: o.package.description || '',
+                links: o.package.links || {}
+              }));
+              _mcpSearchCache.key = q;
+              _mcpSearchCache.ts = Date.now();
+              _mcpSearchCache.data = items;
+              res.writeHead(200, {'Content-Type':'application/json'});
+              res.end(JSON.stringify(items));
+            } catch (e) {
+              res.writeHead(500, {'Content-Type':'application/json'});
+              res.end(JSON.stringify({ error: '解析 npm 响应失败: ' + e.message }));
+            }
+          });
+        }).on('error', e => {
+          res.writeHead(500, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ error: e.message }));
+        });
+        return;
+      }
+      // 读取已安装拓展工具列表（skills.html 渲染已安装状态；重启后 mcp.js 也读此文件自动重连）
+      if (req.method === 'GET' && req.url === '/load-skills') {
+        storage.loadData('skills').then(raw => {
+          res.writeHead(200, {'Content-Type':'application/json'});
+          res.end(raw);
+        });
+        return;
+      }
+      // 保存已安装拓展工具列表到 .skills.json（用户安装/卸载后持久化，重启自动恢复）
+      if (req.method === 'POST' && req.url === '/save-skills') {
+        readBody(req).then(body => {
+          storage.saveData('skills', body).then(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          }).catch(e => {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          });
+        });
+        return;
+      }
+      // 读取内置工具开关配置（renderer 组装 tools 时过滤被取消的工具）
+      if (req.method === 'GET' && req.url === '/load-tools-cfg') {
+        storage.loadData('tools').then(raw => {
+          try { const j = JSON.parse(raw); res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ disabled: j.disabled || [] })); }
+          catch (e) { res.writeHead(200, {'Content-Type':'application/json'}); res.end('{"disabled":[]}'); }
+        });
+        return;
+      }
+      // 保存内置工具开关配置（页面勾选后写入 .tools.json）
+      if (req.method === 'POST' && req.url === '/save-tools-cfg') {
+        readBody(req).then(body => {
+          try {
+            const j = JSON.parse(body);
+            const disabled = Array.isArray(j.disabled) ? j.disabled : [];
+            storage.saveData('tools', JSON.stringify({ disabled })).then(() => {
+              res.writeHead(200, {'Content-Type':'application/json'});
+              res.end(JSON.stringify({ ok: true }));
+            });
+          } catch (e) {
+            res.writeHead(400, {'Content-Type':'application/json'});
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+        return;
+      }
+      let fn = req.url === '/' || req.url.startsWith('/?') ? '/index.html' : decodeURIComponent(req.url.split('?')[0]);
       // 禁止直接访问 data/ 目录下的敏感文件
       if (fn.startsWith('/data/') || fn.startsWith('/.')) {
         res.writeHead(403); res.end('Forbidden'); return;
@@ -987,24 +1078,14 @@ app.whenReady().then(async () => {
   }
   // 确保用户数据目录在可写位置，避免 Program Files 下写入失败
   storage.init(dataPath);
-  // 一次性迁移：把项目目录下旧的 data/ 复制到新位置（仅首次）
-  const newDataDir = storage.getBaseDir();
-  const oldDataDir = path.join(__dirname, 'data');
-  if (fs.existsSync(oldDataDir)) {
-    try {
-      const oldFiles = fs.readdirSync(oldDataDir);
-      for (const f of oldFiles) {
-        const src = path.join(oldDataDir, f);
-        const dst = path.join(newDataDir, f);
-        if (fs.statSync(src).isFile() && !fs.existsSync(dst)) {
-          fs.copyFileSync(src, dst);
-          console.log('[migrate] 已迁移:', f);
-        }
-      }
-    } catch (e) {
-      console.warn('[migrate] 迁移旧 data 失败:', e.message);
-    }
-  }
+  // 启动时主动写出状态文件（默认配置），便于用户直接查看与管理；不会覆盖已有内容
+  const ensureCfg = (name, def) => {
+    const p = storage.getPath(name);
+    if (!fs.existsSync(p)) { try { fs.writeFileSync(p, def); } catch (e) { console.warn(`[main] 初始化 ${name} 配置失败:`, e.message); } }
+  };
+  ensureCfg('tools', JSON.stringify({ disabled: [] }));
+  ensureCfg('skills', JSON.stringify({ installed: {} }));
+  ensureCfg('instructions', JSON.stringify({ list: [] }));
   const port = await startServer();
   const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
@@ -1040,31 +1121,30 @@ app.whenReady().then(async () => {
   ipcMain.on('show-menu', (_, x, y, hasApi, voiceOn, pinOn) => {
     Menu.buildFromTemplate([
       {
-        label: '🎭 表情/手势',
+        label: '😊 表情/手势/装饰',
         submenu: [
-          { label: '😍 爱心眼', click: () => mainWindow.webContents.send('menu', 'expr', '爱心眼') },
-          { label: '✨ 星星眼', click: () => mainWindow.webContents.send('menu', 'expr', '星星眼') },
-          { label: '🥰 脸红', click: () => mainWindow.webContents.send('menu', 'expr', '脸红') },
-          { label: '🖤 黑脸', click: () => mainWindow.webContents.send('menu', 'expr', '黑脸') },
-          { label: '😊 卖萌', click: () => mainWindow.webContents.send('menu', 'expr', '卖萌') },
-          { label: '❓ 问号', click: () => mainWindow.webContents.send('menu', 'expr', '问号') },
-          { label: '😵 悲伤', click: () => mainWindow.webContents.send('menu', 'expr', '晕晕眼') },
-          { label: '😢 生气', click: () => mainWindow.webContents.send('menu', 'expr', '哀怒') },
-          { type: 'separator' },
-          { label: '👋 左手势1', click: () => mainWindow.webContents.send('menu', 'gesture', '左手势1') },
-          { label: '🖐️ 右手势1', click: () => mainWindow.webContents.send('menu', 'gesture', '右手势1') },
-          { label: '✌️ 左手势2', click: () => mainWindow.webContents.send('menu', 'gesture', '左手势2') },
-          { label: '✋ 右手势2', click: () => mainWindow.webContents.send('menu', 'gesture', '右手势2') },
-        ]
-      },
-      { type: 'separator' },
-      { label: '🎀 丸子头', click: () => mainWindow.webContents.send('menu', 'deco', '丸子头') },
-      { label: '👓 眼镜', click: () => mainWindow.webContents.send('menu', 'deco', '眼镜') },
-      { label: '🧝 精灵耳', click: () => mainWindow.webContents.send('menu', 'deco', '精灵耳') },
-      { type: 'separator' },
-      {
-        label: '🎬 动作',
-        submenu: [
+              { label: '😍 爱心眼', click: () => mainWindow.webContents.send('menu', 'expr', '爱心眼') },
+              { label: '✨ 星星眼', click: () => mainWindow.webContents.send('menu', 'expr', '星星眼') },
+              { label: '🥰 脸红', click: () => mainWindow.webContents.send('menu', 'expr', '脸红') },
+              { label: '🖤 黑脸', click: () => mainWindow.webContents.send('menu', 'expr', '黑脸') },
+              { label: '😊 卖萌', click: () => mainWindow.webContents.send('menu', 'expr', '卖萌') },
+              { label: '❓ 问号', click: () => mainWindow.webContents.send('menu', 'expr', '问号') },
+              { label: '😵 悲伤', click: () => mainWindow.webContents.send('menu', 'expr', '晕晕眼') },
+              { label: '😢 生气', click: () => mainWindow.webContents.send('menu', 'expr', '哀怒') },
+              { type: 'separator' },
+              { label: '👋 左手势1', click: () => mainWindow.webContents.send('menu', 'gesture', '左手势1') },
+              { label: '🖐️ 右手势1', click: () => mainWindow.webContents.send('menu', 'gesture', '右手势1') },
+              { label: '✌️ 左手势2', click: () => mainWindow.webContents.send('menu', 'gesture', '左手势2') },
+              { label: '✋ 右手势2', click: () => mainWindow.webContents.send('menu', 'gesture', '右手势2') },
+              { type: 'separator' },
+              { label: '🎀 丸子头', click: () => mainWindow.webContents.send('menu', 'deco', '丸子头') },
+              { label: '👓 眼镜', click: () => mainWindow.webContents.send('menu', 'deco', '眼镜') },
+              { label: '🧝 精灵耳', click: () => mainWindow.webContents.send('menu', 'deco', '精灵耳') },
+            ]
+          },
+          {
+            label: '💃 动作',
+            submenu: [
           // ===== 😊 开心（20个） =====
           { label: '😊 开心', submenu: [
             { label: '爱心握拳L', click: () => mainWindow.webContents.send('menu', 'action', '开心爱心握拳L') },
@@ -1204,16 +1284,18 @@ app.whenReady().then(async () => {
             { label: '心动', click: () => mainWindow.webContents.send('menu', 'action', '害羞心动') },
           ]},
         ]
-      },
+          },
       { type: 'separator' },
-      { label: '🧩 技能', click: () => mainWindow.webContents.send('menu', 'skills', '') },
-      { type: 'separator' },
-      { label: '💬 聊天', click: () => mainWindow.webContents.send('menu', 'chat', '') },
+      { label: '🧰 内置工具', click: () => mainWindow.webContents.send('menu', 'tools', '') },
+      { label: '🧩 拓展工具', click: () => mainWindow.webContents.send('menu', 'skills', '') },
+      { label: '📋 自定义指令', click: () => mainWindow.webContents.send('menu', 'instructions', '') },
       { type: 'separator' },
       hasApi
         ? { label: '✅ 已配置AI', click: () => mainWindow.webContents.send('menu', 'config', '') }
         : { label: '⚙️ 配置AI', click: () => mainWindow.webContents.send('menu', 'config', '') },
       { label: '🎤 配置语音输入', click: () => mainWindow.webContents.send('menu', 'stt-config', '') },
+      { type: 'separator' },
+      { label: '💬 聊天', click: () => mainWindow.webContents.send('menu', 'chat', '') },
       { type: 'separator' },
       voiceOn
         ? { label: '🔊 关闭语音', click: () => mainWindow.webContents.send('menu', 'voice', 'off') }
@@ -1270,12 +1352,34 @@ app.whenReady().then(async () => {
   ipcMain.on('open-skills-window', () => {
     if (skillsWindow && !skillsWindow.isDestroyed()) { if(skillsWindow.isMinimized())skillsWindow.restore(); skillsWindow.focus(); return; }
     skillsWindow = new BrowserWindow({
-      width: 380, height: 420, resizable: false,
+      width: 380, height: 560, resizable: false,
       transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
     });
     skillsWindow.loadURL(`http://127.0.0.1:${port}/skills.html`);
     skillsWindow.on('closed', () => { skillsWindow = null; });
+  });
+  // 内置工具管理窗口
+  ipcMain.on('open-tools-window', () => {
+    if (toolsWindow && !toolsWindow.isDestroyed()) { if(toolsWindow.isMinimized())toolsWindow.restore(); toolsWindow.focus(); return; }
+    toolsWindow = new BrowserWindow({
+      width: 380, height: 460, resizable: false,
+      transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
+      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
+    });
+    toolsWindow.loadURL(`http://127.0.0.1:${port}/tools.html`);
+    toolsWindow.on('closed', () => { toolsWindow = null; });
+  });
+  // 自定义指令窗口
+  ipcMain.on('open-instructions-window', () => {
+    if (instructionsWindow && !instructionsWindow.isDestroyed()) { if(instructionsWindow.isMinimized())instructionsWindow.restore(); instructionsWindow.focus(); return; }
+    instructionsWindow = new BrowserWindow({
+      width: 380, height: 460, resizable: false,
+      transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
+      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
+    });
+    instructionsWindow.loadURL(`http://127.0.0.1:${port}/instructions.html`);
+    instructionsWindow.on('closed', () => { instructionsWindow = null; });
   });
   // 隐藏/显示宠物：隐藏时推到窗口最底层，显示时置顶
   ipcMain.on('toggle-pin', () => {
@@ -1364,7 +1468,10 @@ app.whenReady().then(async () => {
     if (win) win.minimize();
   });
   // 打开开发者工具
-
+  ipcMain.on('open-devtools', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win) win.webContents.openDevTools({mode:'detach'});
+  });
 
 });
 app.on('window-all-closed', () => {

@@ -30,45 +30,13 @@ input:focus,select:focus{border-color:#ff6b9d}
 <div class="pwd-wrap"><input id="cfg-key" type="password" placeholder="sk-..."/><span class="pwd-toggle" id="pwdToggle" onclick="toggleKey()">👁</span></div>
 <label>模型名称</label>
 <select id="cfg-model" onchange="onModelChange()">
-  <optgroup label="DeepSeek">
-    <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
-    <option value="deepseek-chat">DeepSeek V3 / Chat</option>
-    <option value="deepseek-reasoner">DeepSeek R1 (推理)</option>
-  </optgroup>
-  <optgroup label="OpenAI">
-    <option value="gpt-4.1">GPT-4.1</option>
-    <option value="gpt-4o">GPT-4o</option>
-    <option value="gpt-4o-mini">GPT-4o Mini</option>
-    <option value="o3-mini">o3-mini</option>
-    <option value="o4-mini">o4-mini</option>
-  </optgroup>
-  <optgroup label="Google Gemini">
-    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-    <option value="gemini-2.5-flash-8b">Gemini 2.5 Flash 8B</option>
-    <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-  </optgroup>
-  <optgroup label="月之暗面 Kimi">
-    <option value="moonshot-v1-128k">Moonshot V1 128K</option>
-    <option value="moonshot-v1-32k">Moonshot V1 32K</option>
-    <option value="moonshot-v1-8k">Moonshot V1 8K</option>
-  </optgroup>
-  <optgroup label="通义千问">
-    <option value="qwen-max">Qwen Max (最新版)</option>
-    <option value="qwen-plus">Qwen Plus</option>
-    <option value="qwen-turbo">Qwen Turbo</option>
-    <option value="qwen-max-longcontext">Qwen Max 长上下文</option>
-  </optgroup>
-  <optgroup label="智谱 GLM">
-    <option value="glm-4-plus">GLM-4-Plus</option>
-    <option value="glm-4-flash">GLM-4-Flash</option>
-  </optgroup>
-  <optgroup label="零一万物 Yi">
-    <option value="yi-lightning">Yi Lightning</option>
-  </optgroup>
-  <optgroup label="阶跃星辰 Step">
-    <option value="step-2">Step-2</option>
-  </optgroup>
-  <optgroup value="__custom__" label="— 自定义 —">
+  <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+  <option value="qwen-max">通义千问 Qwen3-Max</option>
+  <option value="glm-5.2">智谱 GLM-5.2</option>
+  <option value="kimi-k2">Kimi K2.5</option>
+  <option value="doubao-seed-2.0-pro">豆包 Seed-2.0 Pro</option>
+  <option value="ernie-5.0">文心 ERNIE 5.0</option>
+  <optgroup label="— 自定义 —">
     <option value="__custom__">自定义模型...</option>
   </optgroup>
 </select>
@@ -94,77 +62,42 @@ input:focus,select:focus{border-color:#ff6b9d}
 const MODEL_URLS={
   // DeepSeek
   'deepseek-v4-flash':'https://api.deepseek.com/v1',
-  'deepseek-chat':'https://api.deepseek.com/v1',
-  'deepseek-reasoner':'https://api.deepseek.com/v1',
-  // OpenAI
-  'gpt-4.1':'https://api.openai.com/v1',
-  'gpt-4o':'https://api.openai.com/v1',
-  'gpt-4o-mini':'https://api.openai.com/v1',
-  'o3-mini':'https://api.openai.com/v1',
-  'o4-mini':'https://api.openai.com/v1',
-  // Google Gemini（OpenAI 兼容接口）
-  'gemini-2.5-flash':'https://generativelanguage.googleapis.com/v1beta/openai',
-  'gemini-2.5-flash-8b':'https://generativelanguage.googleapis.com/v1beta/openai',
-  'gemini-2.5-pro':'https://generativelanguage.googleapis.com/v1beta/openai',
-  // 月之暗面 Kimi
-  'moonshot-v1-128k':'https://api.moonshot.cn/v1',
-  'moonshot-v1-32k':'https://api.moonshot.cn/v1',
-  'moonshot-v1-8k':'https://api.moonshot.cn/v1',
   // 通义千问
   'qwen-max':'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  'qwen-plus':'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  'qwen-turbo':'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  'qwen-max-longcontext':'https://dashscope.aliyuncs.com/compatible-mode/v1',
   // 智谱 GLM
-  'glm-4-plus':'https://open.bigmodel.cn/api/paas/v4',
-  'glm-4-flash':'https://open.bigmodel.cn/api/paas/v4',
-  // 零一万物 Yi
-  'yi-lightning':'https://api.lingyiwanwu.com/v1',
-  // 阶跃星辰 Step
-  'step-2':'https://api.stepfun.com/v1',
+  'glm-5.2':'https://open.bigmodel.cn/api/paas/v4',
+  // 月之暗面 Kimi
+  'kimi-k2':'https://api.moonshot.cn/v1',
+  // 豆包（火山引擎 Ark，OpenAI 兼容）
+  'doubao-seed-2.0-pro':'https://ark.cn-beijing.volces.com/api/v3',
+  // 文心（百度千帆，OpenAI 兼容）
+  'ernie-5.0':'https://qianfan.baidubce.com/v2',
 };
 const MODEL_CONTEXTS={
-  // DeepSeek
+  // DeepSeek V4 Flash：原生 1M 上下文、思考/非思考双模
   'deepseek-v4-flash':1000000,
-  'deepseek-chat':65536,
-  'deepseek-reasoner':128000,
-  // OpenAI
-  'gpt-4.1':1000000,
-  'gpt-4o':128000,
-  'gpt-4o-mini':128000,
-  'o3-mini':200000,
-  'o4-mini':200000,
-  // Google Gemini
-  'gemini-2.5-flash':1048576,
-  'gemini-2.5-flash-8b':1048576,
-  'gemini-2.5-pro':2000000,
-  // 月之暗面 Kimi
-  'moonshot-v1-128k':128000,
-  'moonshot-v1-32k':32768,
-  'moonshot-v1-8k':8192,
-  // 通义千问
-  'qwen-max':32768,
-  'qwen-plus':131072,
-  'qwen-turbo':1000000,
-  'qwen-max-longcontext':10000000,
-  // 智谱 GLM
-  'glm-4-plus':131072,
-  'glm-4-flash':131072,
-  // 零一万物 Yi
-  'yi-lightning':200000,
-  // 阶跃星辰 Step
-  'step-2':196608,
+  // 通义千问 Qwen3-Max：256K 上下文
+  'qwen-max':256000,
+  // 智谱 GLM-5.2：1M 上下文（纯文本，不支持视觉）
+  'glm-5.2':1000000,
+  // Kimi K2.5：256K 上下文
+  'kimi-k2':256000,
+  // 豆包 Seed-2.0 Pro：256K 上下文、图文视频多模态
+  'doubao-seed-2.0-pro':256000,
+  // 文心 ERNIE 5.0：128K 上下文、原生全模态
+  'ernie-5.0':128000,
 };
 function modelSupportsVision(model){
   const m=(model||'').toLowerCase();
-  if(/^(gpt-4|gpt-4o|gpt-4\.1|gpt-4o-mini|o4-mini|gemini|claude|qwen-vl|qwen2?\.?5-vl|glm-4v|kimi-vl|moonshot-vl|step|yi-vl)/.test(m))return true;
+  // 2026 国产多模态支持（DeepSeek V4 当前 API 仅接受文本、GLM 为纯文本，均不支持视觉）
+  if(/^(qwen|kimi|doubao|ernie)/.test(m))return true;
   if(/vl|vision|多模态/.test(m))return true;
   return false;
 }
 function modelSupportsThinking(model){
   const m=(model||'').toLowerCase();
-  if(/deepseek/.test(m))return true;            // deepseek-chat / reasoner 支持 thinking beta
-  if(/^(gpt-4o|gpt-4\.1|o1|o3|o4|gemini|claude|qwq|qwen3|glm-z1|kimi|reasoner|r1)/.test(m))return true;
+  // 2026 国产主流大模型均支持深度思考/推理模式
+  if(/^(deepseek|qwen|glm|kimi|doubao|ernie)/.test(m))return true;
   if(/reason|think|reasoner|r1|-t1|o1|o3/.test(m))return true;
   return false;
 }
