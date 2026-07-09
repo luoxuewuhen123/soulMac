@@ -56,7 +56,6 @@
       "installerIcon": "icon.ico",
       "uninstallerIcon": "icon.ico",
       "installerHeaderIcon": "icon.ico",
-      "license": "LICENSE.txt",
       "include": "installer.nsh"
     },
     "artifactName": "${productName}_${version}_${os}-${arch}.${ext}",
