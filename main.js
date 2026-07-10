@@ -255,36 +255,45 @@ function startServer() {
         const matcher = isRegex
           ? new RegExp(q, caseSensitive ? '' : 'i')
           : { test: (line) => (caseSensitive ? line : line.toLowerCase()).includes(caseSensitive ? q : q.toLowerCase()) };
+        const MAX_RESULTS = 500;
         (async () => {
           const results = [];
+          const fileMatchCount = {}; // per-file match count
           async function walk(dir) {
             let entries;
             try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch(e) { return; }
             for (const e of entries) {
               if (e.name.startsWith('.') || e.name === 'node_modules') continue;
               const fp = path.join(dir, e.name);
-              if (e.isDirectory()) { await walk(fp); if (results.length >= 100) return; }
+              if (e.isDirectory()) { await walk(fp); if (results.length >= MAX_RESULTS) return; }
               else if ((!fileType || path.extname(e.name).toLowerCase() === '.' + fileType.replace(/^\./, '')) && SEARCH_EXTS.includes(path.extname(e.name).toLowerCase())) {
                 try {
                   const content = await fs.promises.readFile(fp, 'utf-8');
                   const lines = content.split('\n');
                   const totalLines = lines.length;
+                  const relPath = path.relative(resolved, fp);
+                  let fileMatches = 0;
                   for (let i = 0; i < lines.length; i++) {
                     if (!matcher.test(lines[i])) continue;
+                    fileMatches++;
+                    if (results.length >= MAX_RESULTS) break;
                     const context = ctxLines > 0
                       ? [...lines.slice(Math.max(0,i-ctxLines),i), '→'+lines[i], ...lines.slice(i+1, Math.min(lines.length,i+1+ctxLines))].join('\n')
                       : lines[i];
-                    results.push({ file: path.relative(resolved, fp), line: i+1, content: lines[i].trim(), context, lines: totalLines });
-                    if (results.length >= 100) break;
+                    results.push({ file: relPath, line: i+1, content: lines[i].trim(), context, lines: totalLines });
                   }
+                  if (fileMatches > 0) fileMatchCount[relPath] = (fileMatchCount[relPath] || 0) + fileMatches;
                 } catch(e) {}
-                if (results.length >= 100) return;
+                if (results.length >= MAX_RESULTS) return;
               }
             }
           }
           await walk(resolved);
+          const fileStats = Object.entries(fileMatchCount)
+            .map(([file, matches]) => ({ file, matches }))
+            .sort((a, b) => b.matches - a.matches);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ results: results.slice(0,100), total: results.length, truncated: results.length >= 100 }));
+          res.end(JSON.stringify({ results: results.slice(0, MAX_RESULTS), total: results.length, truncated: results.length >= MAX_RESULTS, fileStats }));
         })();
         return;
       }
@@ -626,6 +635,98 @@ function startServer() {
               res.end(JSON.stringify({ success: true }));
             });
           } catch(e) { res.writeHead(400); res.end('{"error":"invalid json"}'); }
+        });
+        return;
+      }
+      // 符号重命名（搜索整个项目 + 精确替换）
+      if (req.method === 'POST' && req.url === '/rename-symbol') {
+        readBody(req).then(body => {
+          try {
+            const { oldName, newName, searchPath, fileType } = JSON.parse(body);
+            if (!oldName || !newName) { res.writeHead(400); res.end(JSON.stringify({ error: '缺少参数 oldName/newName' })); return; }
+            const resolved = safePath(searchPath || '.');
+            if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: '路径不允许' })); return; }
+            // 用正则严格匹配单词边界，避免子串误伤（如 forgetData 不会被 getData 匹配到）
+            const re = new RegExp('\\b' + oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'g');
+            const results = [];
+            (async () => {
+              async function walk(dir) {
+                let entries;
+                try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch(e) { return; }
+                for (const e of entries) {
+                  if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+                  const fp = path.join(dir, e.name);
+                  if (e.isDirectory()) { await walk(fp); continue; }
+                  if (fileType && path.extname(e.name).toLowerCase() !== '.' + fileType.replace(/^\./, '')) continue;
+                  const SEARCH_EXTS = ['.js','.jsx','.mjs','.cjs','.ts','.tsx','.vue','.html','.css','.scss','.less','.json','.xml','.yaml','.yml','.md','.py','.java','.go','.rs','.rb','.php','.c','.cpp','.h','.hpp','.swift','.kt','.dart','.lua','.pl','.sh','.bat','.ps1'];
+                  if (!SEARCH_EXTS.includes(path.extname(e.name).toLowerCase())) continue;
+                  try {
+                    const content = await fs.promises.readFile(fp, 'utf-8');
+                    if (!re.test(content)) continue;
+                    re.lastIndex = 0;
+                    const lines = content.split('\n');
+                    const matches = [];
+                    for (let i = 0; i < lines.length; i++) {
+                      let m; re.lastIndex = 0;
+                      while ((m = re.exec(lines[i])) !== null) {
+                        matches.push({ line: i + 1, column: m.index + 1, content: lines[i].trim() });
+                      }
+                    }
+                    if (matches.length === 0) continue;
+                    const relPath = path.relative(resolved, fp);
+                    const newContent = content.replace(re, newName);
+                    results.push({ file: relPath, matches, newContent, oldContent: content });
+                  } catch(e) {}
+                }
+              }
+              await walk(resolved);
+              if (results.length === 0) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ changed: 0, files: [], message: '未找到符号 "' + oldName + '" 的引用' }));
+                return;
+              }
+              // 写入所有修改 + 语法检查
+              let changed = 0, totalOccurrences = 0;
+              const changes = [];
+              for (const r of results) {
+                totalOccurrences += r.matches.length;
+                try {
+                  const targetPath = safePath(r.file) || path.join(resolved, r.file);
+                  await fs.promises.writeFile(targetPath, r.newContent, 'utf-8');
+                  changed++;
+                  // 对该文件执行语法检查
+                  const lintResult = await new Promise(resolve => {
+                    lintFile(targetPath, (e, lint) => resolve(lint));
+                  });
+                  changes.push({
+                    file: r.file,
+                    occurrences: r.matches.length,
+                    // 每处变更的行级详情（最多展示前 20 处，避免反馈过长）
+                    details: r.matches.slice(0, 20).map(m => ({
+                      line: m.line,
+                      column: m.column,
+                      snippet: m.content.length > 60 ? m.content.substring(0, 60) + '...' : m.content,
+                    })),
+                    hasMore: r.matches.length > 20,
+                    lint: lintResult || null,
+                  });
+                } catch(e) {
+                  changes.push({ file: r.file, occurrences: r.matches.length, error: e.message, lint: null });
+                }
+              }
+              const detailMsg = changed > 0
+                ? '已将 "' + oldName + '" → "' + newName + '"（' + changed + ' 个文件，' + totalOccurrences + ' 处）\n\n' + changes.map(c =>
+                    '📄 ' + c.file + '（' + c.occurrences + ' 处）' +
+                    (c.lint ? (c.lint.ok ? ' ✅ 语法正常' : ' ❌ ' + c.lint.output.substring(0, 200)) : '') +
+                    (c.error ? ' ❌ ' + c.error : '') +
+                    '\n' + (c.details || []).slice(0, 5).map(d => '  L' + d.line + ':' + d.column + ' ' + d.snippet).join('\n') +
+                    (c.hasMore ? '\n  ... 还有 ' + (c.occurrences - 5) + ' 处' : '')
+                  ).join('\n\n')
+                : '未找到符号 "' + oldName + '" 的引用';
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ changed, totalOccurrences, changes, message: detailMsg }));
+            })();
+          } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid json' })); }
         });
         return;
       }
@@ -1342,7 +1443,10 @@ app.whenReady().then(async () => {
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
     });
     petCfgWindow.loadURL(`http://127.0.0.1:${port}/pet-cfg.html`);
-    petCfgWindow.on('closed', () => { petCfgWindow = null; });
+    petCfgWindow.on('closed', () => {
+      petCfgWindow = null;
+      if(mainWindow&&!mainWindow.isDestroyed()) mainWindow.webContents.send('pet-cfg-window-closed');
+    });
   });
   // 隐藏/显示宠物：隐藏时推到窗口最底层，显示时置顶
   ipcMain.on('toggle-pin', () => {

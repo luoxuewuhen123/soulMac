@@ -711,6 +711,7 @@ function makeTools(){
   {type:'function',function:{name:'bash',description:'执行 shell 命令并返回输出（Windows 下使用 PowerShell，注意：PowerShell命令不是cmd命令），支持中文/emoji 路径',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的命令（Windows 下用 PowerShell 语法，不支持 &&）'}},required:['command'],additionalProperties:false}}},
   {type:'function',function:{name:'web_search',description:'搜索互联网，获取相关网页标题/链接/摘要',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词'},count:{type:'number',description:'返回结果数，默认5，最大10'}},required:['q'],additionalProperties:false}}},
   {type:'function',function:{name:'web_fetch',description:'抓取网页文字，获取文档/资料信息',strict:true,parameters:{type:'object',properties:{url:{type:'string',description:'完整 URL（含 https://）'}},required:['url'],additionalProperties:false}}},
+  {type:'function',function:{name:'rename_symbol',description:'符号重命名：将代码中的函数名/变量名/类名等精确重命名（按单词边界匹配，不误伤子串），会搜索工作空间内所有代码文件并全部替换',strict:true,parameters:{type:'object',properties:{oldName:{type:'string',description:'旧符号名（如 getUserInfo）'},newName:{type:'string',description:'新符号名（如 fetchUserProfile）'},searchPath:{type:'string',description:'搜索目录，不传则搜整个工作空间'},fileType:{type:'string',description:'限定文件类型扩展名，如 js/py/html，不传则搜所有代码文件'}},required:['oldName','newName'],additionalProperties:false}}},
   ];
   // read_image 已合并进 read_files（按扩展名自动识别图片，视觉门控在工具内处理）
   let result = all;
@@ -781,8 +782,8 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
         let mcpServer='',mcpTool='';
         if(name.startsWith('mcp__')){const p=name.split('__');mcpServer=p[1];mcpTool=p.slice(2).join('__');}
         const isBrowser=mcpServer==='browser';
-        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_file:'📖',apply_patch:'✏️',write_file:'📝',delete_file:'🗑',search:'🔍',search_file:'🔍',tree:'🌳',bash:'💻',web_search:'🌐',web_fetch:'🌐'}[name]||'');
-        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_file:'读取',apply_patch:'编辑',write_file:'写入',delete_file:'删除',search:'搜索',search_file:'搜索文件',tree:'目录树',bash:'执行命令',web_search:'搜索网页',web_fetch:'抓取网页'}[name]||name));
+        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_file:'📖',apply_patch:'✏️',write_file:'📝',delete_file:'🗑',search:'🔍',search_file:'🔍',tree:'🌳',bash:'💻',web_search:'🌐',web_fetch:'🌐',rename_symbol:'🔁'}[name]||'');
+        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_file:'读取',apply_patch:'编辑',write_file:'写入',delete_file:'删除',search:'搜索',search_file:'搜索文件',tree:'目录树',bash:'执行命令',web_search:'搜索网页',web_fetch:'抓取网页',rename_symbol:'重命名'}[name]||name));
         const pathDesc=args.path||args.paths?.join(', ')||args.command||args.question||args.url||'';
         let browserUrl='';
         await new Promise(r=>setTimeout(r,50));
@@ -865,7 +866,7 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
             return detail;
           }
           if(name==='delete_file'){const r=await fetchTool('/delete-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(r.ok){st({text:'✓ 删除 '+args.path,ok:true});return '✓ delete_file '+args.path;}const de=await r.json().catch(()=>({}));st({text:'✗ 删除 '+args.path,err:true});return '✗ delete_file '+args.path+': '+(de.error||'请求失败');}
-          if(name==='search'){const ctx=args.context!==undefined?args.context:2;const cs=args.caseSensitive?'true':'false';const ft=args.type||'';const p=args.path||'.';const r=await fetchTool('/search?q='+encodeURIComponent(args.q)+'&context='+ctx+'&caseSensitive='+cs+'&type='+ft+(p!=='.'?'&path='+encodeURIComponent(p):''),{},{signal:ac.signal});if(r.ok){const data=await r.json();const rs=data.results||[];st({text:'✓ 搜索 "'+args.q+'" '+rs.length+'个结果',ok:true});if(rs.length===0)return '✓ search "'+args.q+'" (0个结果)';const more=data.truncated?'\n⚠️ 结果较多，仅显示前100个':'';return '✓ search "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+rs.map(d=>'  '+d.file+':'+d.line+(ctx>0?'\n'+d.context.split('\n').map(l=>'    '+l).join('\n'):'')).join('\n---\n')+more;}st({text:'✗ 搜索失败',err:true});return '✗ search';}
+          if(name==='search'){const ctx=args.context!==undefined?args.context:2;const cs=args.caseSensitive?'true':'false';const ft=args.type||'';const p=args.path||'.';const r=await fetchTool('/search?q='+encodeURIComponent(args.q)+'&context='+ctx+'&caseSensitive='+cs+'&type='+ft+(p!=='.'?'&path='+encodeURIComponent(p):''),{},{signal:ac.signal});if(r.ok){const data=await r.json();const rs=data.results||[];const fs=data.fileStats||[];st({text:'✓ 搜索 "'+args.q+'" '+rs.length+'个结果'+(data.total>rs.length?'/共'+data.total+'':''),ok:true});if(rs.length===0)return '✓ search "'+args.q+'" (0个结果)';const more=data.truncated?'\n⚠️ 结果较多（≥'+data.total+'条），仅显示前500个，建议用更精确的关键词或限定 fileType 缩小范围':'';const summary='📊 分布：'+fs.map(f=>f.file+'('+f.matches+'处)').join('、')+'\n\n';const details=rs.map(d=>'  '+d.file+':'+d.line+(ctx>0?'\n'+d.context.split('\n').map(l=>'    '+l).join('\n'):'')).join('\n---\n');if(details.length>25000)return '✓ search "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+summary+details.substring(0,25000)+'\n...(详情过长已截断)'+more;return '✓ search "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+summary+details+more;}st({text:'✗ 搜索失败',err:true});return '✗ search';}
           if(name==='search_file'){const p=args.path||'.';st({text:'🔍 搜索文件: '+args.pattern,ok:false});const r=await fetchTool('/search-file?pattern='+encodeURIComponent(args.pattern)+'&recursive='+(args.recursive!==false)+'&path='+encodeURIComponent(p),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 搜索文件失败',err:true});return '✗ search_file: 请求失败';}const rd=await r.json();if(!rd.length){st({text:'🔍 未找到匹配 '+args.pattern+' 的文件',ok:true});return '✓ search_file "'+args.pattern+'" (0个)';}st({text:'✓ 找到 '+rd.length+' 个匹配 '+args.pattern,ok:true});return '✓ search_file "'+args.pattern+'" ('+rd.length+'个)\n'+rd.join('\n');}
           if(name==='tree'){const path=args.path||'.';const maxDepth=args.maxDepth||3;const ignore=args.ignore||[];st({text:'🌳 目录树: '+path,ok:false});const r=await fetchTool('/tree?path='+encodeURIComponent(path)+'&maxDepth='+maxDepth+(ignore.length?'&ignore='+encodeURIComponent(ignore.join(',')):''),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 目录树失败',err:true});return '✗ tree: 请求失败';}const c=await r.text();if(!c.trim()){st({text:'🌳 空目录或不存在: '+path,ok:true});return '⚠️ tree: 目录为空或不存在';}st({text:'✓ 目录树: '+path,ok:true});return c;}
           if(name==='bash'){const cmdRaw=args.command;st({text:'💻 执行: '+cmdRaw,ok:false});const r=await fetchTool('/bash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmdRaw})},{timeout:180000,signal:ac.signal});if(!r.ok){st({text:'✗ 命令执行失败: '+cmdRaw,err:true});return '✗ bash: 执行失败';}const rd=await r.json();let output=rd.output;if(output.length>30000)output=output.substring(0,30000)+'\n...(输出过长已截断，共'+rd.output.length+'字符)';const ok=rd.code===0;st({text:(ok?'✓ 执行完成: ':'✗ 执行失败: ')+cmdRaw+(ok?' (exit:'+rd.code+')':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' bash: exit code='+rd.code+'\n'+output;}
@@ -902,6 +903,25 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
               st({text:'✓ 已获取 '+args.url+(truncated?'（已自动翻页）':'')+(full.length>HARD_CAP?'（截断）':''),ok:true});
               return full||'(空内容)';
             }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 抓取异常',err:true});return '✗ web_fetch: '+e.message;}
+          }
+
+          if(name==='rename_symbol'){
+            st({text:'🔁 重命名: '+args.oldName+' → '+args.newName,ok:false});
+            try{
+              const r=await fetchTool('/rename-symbol',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldName:args.oldName,newName:args.newName,searchPath:args.searchPath,fileType:args.fileType})},{timeout:60000,signal:ac.signal});
+              if(!r.ok){st({text:'✗ 重命名失败',err:true});return '✗ rename_symbol: 请求失败';}
+              const rd=await r.json();
+              if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ rename_symbol: '+rd.error;}
+              if(rd.changed>0){
+                didMutate=true;
+                const errFiles=rd.changes.filter(c=>c.lint&&!c.lint.ok);
+                if(errFiles.length>0)st({text:'⚠️ 重命名完成，但有 '+errFiles.length+' 个文件语法检查未通过',ok:true});
+                else st({text:'✓ 重命名完成: '+args.oldName+' → '+args.newName+'（'+rd.changed+'文件，'+rd.totalOccurrences+'处）',ok:true});
+              }else{
+                st({text:'⚠️ '+rd.message,ok:true});
+              }
+              return rd.message;
+            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 重命名异常',err:true});return '✗ rename_symbol: '+e.message;}
           }
 
           st({text:icon+' 未知工具: '+name,err:true});return name+': 未知工具';
@@ -1220,6 +1240,9 @@ window.api?.onFromChatWindow(data=>{
 
 });
 window.api?.onAiCfgWindowClosed(async()=>{
+  await loadAllConfigs();
+});
+window.api?.onPetCfgWindowClosed(async()=>{
   await loadAllConfigs();
 });
 // 技能变更时立即清除 MCP 工具缓存，下次 AI 调用自动拉取最新工具列表

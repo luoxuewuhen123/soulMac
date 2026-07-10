@@ -54,6 +54,7 @@ const TOOLS = [
   {name:'bash', icon:'💻', label:'执行命令', desc:'在终端执行 shell 命令并取回输出（Windows 用 PowerShell）。能力最强，可按需关闭'},
   {name:'web_search', icon:'🔍', label:'搜索网页', desc:'搜索互联网，返回相关网页标题/链接/摘要，适合查文档、搜资料'},
   {name:'web_fetch', icon:'🌐', label:'抓取网页', desc:'抓取网页文字内容，适合查文档、搜资料'},
+  {name:'rename_symbol', icon:'🔁', label:'符号重命名', desc:'将代码中的函数名/变量名/类名精确重命名（按单词边界匹配，不误伤子串），自动搜索整个项目并全部替换'},
 ];
 
 let disabled = new Set();
