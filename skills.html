@@ -95,6 +95,9 @@ html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:
 <script>
 // ===== 预设拓展工具商店 =====
 const SKILLS = [
+  {id:'pdf', icon:'📄', name:'PDF 处理', desc:'宠物可以读取、合并、拆分、编辑 PDF 文件。基于 PDF MCP Server', cmd:'npx', args:['-y','@mcp/pdf-server']},
+  {id:'office-doc', icon:'📋', name:'Office 文档（Word/Excel/PPT）', desc:'宠物可以直接创建、读写 Word、Excel、PowerPoint 文档，支持自然语言操作。Python 3.10+ 需安装 uv：pip install uv', cmd:'uvx', args:['office-mcp-server']},
+  {id:'doc-reader', icon:'📑', name:'文档读取器（全格式解析）', desc:'读取 PDF、Word、Excel、PPT 及图片的文字内容，适合快速提取信息。基于 AWS Document Loader MCP，需 Python 3.10+', cmd:'uvx', args:['awslabs.document-loader-mcp-server'], env:{MCP_PROJECT_DIR:'.'}},
   {id:'browser', icon:'🌐', name:'浏览器控制', desc:'让宠物可以打开网页、截图、点击按钮、填写表单。基于 Playwright MCP', cmd:'npx', args:['-y','@playwright/mcp','--headless']},
   {id:'docs', icon:'📚', name:'文档查询', desc:'宠物可以实时查询任意开源库的最新官方文档，避免 API 幻觉。基于 Context7', cmd:'npx', args:['-y','@upstash/context7-mcp']},
   {id:'github', icon:'🐙', name:'GitHub 管理', desc:'管理仓库、提 Issue、Review PR、查看代码。基于 GitHub MCP 官方', cmd:'npx', args:['-y','@modelcontextprotocol/server-github']},
@@ -106,7 +109,6 @@ const SKILLS = [
   {id:'memory', icon:'🧠', name:'项目记忆', desc:'宠物能记住项目结构、技术栈和历史决策，重启不丢失上下文。基于 Memory Bank MCP', cmd:'npx', args:['-y','@modelcontextprotocol/server-memory'], env:{MEMORY_FILE_PATH:'data/memory.jsonl'}},
   {id:'translate', icon:'🌍', name:'多语言翻译', desc:'宠物可以翻译代码注释、文档、界面文案到任意语言。基于 MCP Translate', cmd:'npx', args:['-y','@mcp/translate-server']},
   {id:'email', icon:'📧', name:'邮件管理', desc:'宠物可以帮你收发邮件、管理收件箱、自动回复。基于 Email MCP', cmd:'npx', args:['-y','@mcp/email-server']},
-  {id:'pdf', icon:'📄', name:'PDF 处理', desc:'宠物可以读取、合并、拆分、编辑 PDF 文件。基于 PDF MCP Server', cmd:'npx', args:['-y','@mcp/pdf-server']},
   {id:'weather', icon:'🌤️', name:'天气查询', desc:'查询实时天气、未来预报、空气质量等信息。基于 Weather MCP', cmd:'npx', args:['-y','@mcp/weather-server']},
   {id:'news', icon:'📰', name:'新闻聚合', desc:'获取最新新闻头条，按分类/关键词筛选。基于 News MCP', cmd:'npx', args:['-y','@mcp/news-server']},
   {id:'calculator', icon:'🧮', name:'科学计算', desc:'复杂数学计算、单位换算、公式求解。基于 Math MCP', cmd:'npx', args:['-y','@mcp/calculator-server']},

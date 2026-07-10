@@ -124,6 +124,58 @@ async function connectAll() {
   return result;
 }
 
+/** 归一化 inputSchema 以兼容 OpenAI strict 模式：补 additionalProperties:false、递归处理嵌套、剔除不支持的类型 */
+function normalizeSchema(schema) {
+  if (!schema || typeof schema !== 'object') return { type: 'object', properties: {}, additionalProperties: false };
+  const out = { ...schema };
+  // strict 模式要求顶层为 object 且 additionalProperties:false
+  if (out.type !== 'object' && out.type !== undefined) {
+    // 非 object schema（如纯 string）无法满足 strict，包装成 object
+    return { type: 'object', properties: {}, additionalProperties: false };
+  }
+  out.type = 'object';
+  out.additionalProperties = false;
+  if (out.properties && typeof out.properties === 'object') {
+    const props = {};
+    for (const [k, v] of Object.entries(out.properties)) {
+      if (!v || typeof v !== 'object') continue;
+      const nv = { ...v };
+      if (nv.type === 'array') {
+        if (nv.items) nv.items = normalizeSchemaItem(nv.items);
+        delete nv.additionalProperties;
+      } else if (nv.type === 'object') {
+        nv.additionalProperties = false;
+        if (nv.properties) {
+          const sub = {};
+          for (const [sk, sv] of Object.entries(nv.properties)) sub[sk] = normalizeSchemaItem(sv);
+          nv.properties = sub;
+        }
+      }
+      props[k] = nv;
+    }
+    out.properties = props;
+  } else {
+    out.properties = {};
+  }
+  // strict 模式不支持 default；保留 required 原样
+  return out;
+}
+function normalizeSchemaItem(item) {
+  if (!item || typeof item !== 'object') return { type: 'string' };
+  const nv = { ...item };
+  if (nv.type === 'object') {
+    nv.additionalProperties = false;
+    if (nv.properties) {
+      const sub = {};
+      for (const [sk, sv] of Object.entries(nv.properties)) sub[sk] = normalizeSchemaItem(sv);
+      nv.properties = sub;
+    }
+  } else if (nv.type === 'array' && nv.items) {
+    nv.items = normalizeSchemaItem(nv.items);
+  }
+  return nv;
+}
+
 /** 获取工具定义（按需连接） */
 async function getToolDefinitions() {
   if (servers.length === 0) {
@@ -141,7 +193,7 @@ async function getToolDefinitions() {
           name: `mcp__${server.name}__${tool.name}`,
           description: `[${server.name}] ${tool.description || ''}`,
           strict: true,
-          parameters: tool.inputSchema || { type: 'object', properties: {} },
+          parameters: normalizeSchema(tool.inputSchema),
         },
       });
     }

@@ -9,7 +9,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f9f9fb;font:13px/1.
 
 
 #msgs{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
-#msgs .msg{max-width:85%;padding:6px 12px;border-radius:12px;word-break:break-word;line-height:1.5;animation:fadeIn .2s ease}
+#msgs .msg{max-width:85%;padding:6px 12px;border-radius:12px;word-break:break-word;overflow-wrap:break-word;line-height:1.5;animation:fadeIn .2s ease}
 #msgs .msg .time{display:block;font-size:10px;opacity:.5;margin-top:3px}
 #msgs .msg.me{align-self:flex-end;background:#ff6b9d;color:#fff;border-radius:12px 12px 4px 12px}
 #msgs .msg.me .time{text-align:right;color:#fff}
@@ -41,7 +41,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f9f9fb;font:13px/1.
 #msgs .msg.tool .read-summary{display:block;padding:4px 10px;line-height:1.6}
 #msgs .msg.tool .read-summary summary{cursor:pointer;user-select:none;color:#559966;font-size:11px;outline:none}
 #msgs .msg.tool .read-summary ul{margin:4px 0 0;padding-left:18px;list-style:disc}
-#msgs .msg.tool .read-summary li{color:#667799;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+#msgs .msg.tool .read-summary li{color:#667799;font-size:11px;word-break:break-word;max-width:100%}
 </style></head>
 <body>
 <div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>💬 与茵茵聊天</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
@@ -89,13 +89,12 @@ async function loadData(){
     btn.textContent='⏹';
     btn.onclick=cancelAi;
     btn.disabled=false;
-    pendingReply={text:'',div:null, inp, btn};
     const loadDiv=document.createElement('div');
     loadDiv.className='msg ai loading';
     loadDiv.innerHTML='正在输入<span>.</span><span>.</span><span>.</span>';
     $('msgs').appendChild(loadDiv);
     $('msgs').scrollTop=$('msgs').scrollHeight;
-    pendingReply.div=loadDiv;
+    pendingReply={text:'',div:loadDiv, inp, btn};
   }
   $('msgs').addEventListener('scroll',updateLoadMore);
 }
@@ -325,48 +324,12 @@ window.api?.onFromPetWindow(data=>{
     }
     $('msgs').scrollTop=$('msgs').scrollHeight;
   }
-  if(data.type==='ask-question'){
-    // 显示问题
-    const qDiv=document.createElement('div');
-    qDiv.className='msg ai';
-    qDiv.textContent='❓ '+data.question;
-    $('msgs').appendChild(qDiv);
-    // 输入框 + 提交按钮
-    const wrap=document.createElement('div');
-    wrap.style.cssText='display:flex;gap:6px;padding:6px 12px;border-top:1px solid #eee;flex-shrink:0;background:#fff';
-    const inp=document.createElement('input');
-    inp.placeholder='输入回答...';
-    inp.style.cssText='flex:1;border:1px solid #ddd;border-radius:20px;padding:7px 12px;outline:none;font-size:13px';
-    const btn=document.createElement('button');
-    btn.textContent='回答';
-    btn.style.cssText='border:none;background:#ff6b9d;color:#fff;border-radius:20px;padding:7px 14px;cursor:pointer;font-size:13px';
-    wrap.appendChild(inp);wrap.appendChild(btn);
-    $('msgs').appendChild(wrap);
-    $('msgs').scrollTop=$('msgs').scrollHeight;
-    inp.focus();
-    const submit=()=>{
-      const answer=inp.value.trim();
-      if(!answer)return;
-      wrap.remove();qDiv.textContent='❓ '+data.question+'\n💬 '+answer;
-      window.api?.sendToPetWindow({type:'user-answer',id:data.id,answer});
-      // 恢复聊天输入框
-      if($('chat-input'))$('chat-input').disabled=false;
-      if($('send-btn')){$('send-btn').disabled=false;$('send-btn').textContent='发送';$('send-btn').onclick=sendMsg;}
-    };
-    btn.onclick=submit;
-    inp.onkeydown=e=>{if(e.key==='Enter')submit();};
-    // 禁用聊天输入框
-    if($('chat-input'))$('chat-input').disabled=true;
-    if($('send-btn'))$('send-btn').disabled=true;
-  }
+  // ask_question 工具已移除
 
 });
 
-// 聊天窗口关闭时，通知宠物窗口停止当前 AI 处理
-window.addEventListener('beforeunload',()=>{
-  if(pendingReply){_cancelLatch=true;window.api?.sendToPetWindow({type:'cancel-ai'});}
-  pendingReply=null;
-});
+// 聊天窗口关闭时仅清理本地状态，不中断 AI 操作
+window.addEventListener('beforeunload',()=>{pendingReply=null;});
 window.api?.onAiCfgWindowClosed(async()=>{
   try{const r=await fetch('/load-ai-cfg');if(r.ok)aiCfg=await r.json()}catch(e){}
 });

@@ -92,9 +92,9 @@ async function save() {
   const msg = document.getElementById('saveMsg');
   try {
     await fetch('/save-pet-cfg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
-    msg.className = 'ok'; msg.textContent = '✅ 保存成功，下次对话生效';
+    msg.className = 'ok'; msg.textContent = '✅ 保存成功';
+    setTimeout(() => window.close(), 800);
   } catch (e) { msg.className = 'err'; msg.textContent = '❌ 保存失败：' + e.message; }
-  setTimeout(() => { msg.textContent = ''; }, 3000);
 }
 
 document.getElementById('saveBtn').addEventListener('click', save);

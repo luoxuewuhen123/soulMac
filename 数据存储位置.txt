@@ -9,3 +9,4 @@ AI 模型配置	.ai-cfg.json
 拓展工具         .skills.json（在插件管理页面添加/卸载，也可手动编辑）
 内置工具         .tools.json
 自定义指令      .instructions.json
+工作空间         .workspace.json

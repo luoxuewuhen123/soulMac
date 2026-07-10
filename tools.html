@@ -44,22 +44,16 @@ html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:
 <div id="footer">改动即时保存，下次对话生效 · 视觉类工具由模型是否支持视觉自动判断</div>
 <script>
 const TOOLS = [
-  {name:'read_files', icon:'📖', label:'读取文件', desc:'读取纯文本/代码文件，支持批量与分段读取。PDF/Word 请用「解析文档」，图片请用「识别图片」'},
-  {name:'apply_patch', icon:'✏️', label:'编辑文件', desc:'用「查找→替换」精准修改文件里某段代码或文字，支持批量替换，不碰其他内容'},
-  {name:'write_file', icon:'📝', label:'写入文件', desc:'新建或整体覆盖纯文本/代码文件。要生成 docx/pdf 请用「生成文档」'},
-  {name:'create_document', icon:'📃', label:'生成文档', desc:'新建 Word(.docx)/PDF 文档，把 Markdown 自动排版成标题/列表/段落。改已有文档请用「编辑文档」'},
-  {name:'edit_document', icon:'✏️', label:'编辑文档', desc:'原地修改已有 Word(.docx)，保留字体/颜色/表格/图片等原格式，只替换指定文字，不丢排版'},
+  {name:'read_file', icon:'📖', label:'读取文件', desc:'读取文件：纯文本/代码（自动识别图片），支持 offset/lines 分段读取'},
+  {name:'apply_patch', icon:'✏️', label:'编辑文件', desc:'用「查找→替换」精准修改文件中的一段文本，不碰其他内容'},
+  {name:'write_file', icon:'📝', label:'写入文件', desc:'新建或整体覆盖纯文本/代码文件'},
   {name:'delete_file', icon:'🗑️', label:'删除文件', desc:'删除指定文件'},
-  {name:'mkdir', icon:'📁', label:'创建目录', desc:'新建文件夹'},
-  {name:'rename', icon:'📁', label:'重命名/移动', desc:'给文件或目录改名，或移动到新路径'},
-  {name:'search', icon:'🔍', label:'搜索代码', desc:'在代码库搜索关键词/定义/引用/正则，快速定位相关代码'},
-  {name:'lint_file', icon:'🔎', label:'检查语法', desc:'检查文件语法错误，写代码后快速排错'},
-  {name:'tree', icon:'🌳', label:'目录树', desc:'递归查看项目结构，maxDepth=1 可替代"列出目录"。可限制深度、忽略噪音目录'},
-  {name:'bash', icon:'💻', label:'执行命令', desc:'在终端执行 shell 命令并取回输出（Windows 用 cmd）。能力最强，可按需关闭'},
-  {name:'read_image', icon:'🖼️', label:'识别图片', desc:'读取图片让 AI 看懂内容（png/jpg/gif/webp/bmp）。需模型支持视觉，否则自动隐藏'},
-  {name:'read_document', icon:'📄', label:'解析文档', desc:'读取 PDF 或 Word(.docx) 文档，提取其中文字内容'},
-  {name:'web_fetch', icon:'🌐', label:'抓取网页', desc:'抓取网页文字内容，适合查文档、搜资料；长页面自动翻页'},
-  {name:'ask_question', icon:'❓', label:'向主人提问', desc:'需要补充信息时，向主人（你）提问确认，避免瞎猜'},
+  {name:'search', icon:'🔍', label:'搜索代码', desc:'搜索代码/文本中的关键词或正则，返回匹配行及上下文'},
+  {name:'search_file', icon:'🔍', label:'搜索文件', desc:'按文件名模式搜索文件（支持通配符 * ?），如 *.html、*test*'},
+  {name:'tree', icon:'🌳', label:'目录树', desc:'递归查看项目结构，可限制深度、忽略噪音目录'},
+  {name:'bash', icon:'💻', label:'执行命令', desc:'在终端执行 shell 命令并取回输出（Windows 用 PowerShell）。能力最强，可按需关闭'},
+  {name:'web_search', icon:'🔍', label:'搜索网页', desc:'搜索互联网，返回相关网页标题/链接/摘要，适合查文档、搜资料'},
+  {name:'web_fetch', icon:'🌐', label:'抓取网页', desc:'抓取网页文字内容，适合查文档、搜资料'},
 ];
 
 let disabled = new Set();
