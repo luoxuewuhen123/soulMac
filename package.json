@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "桌面伴侣",
   "author": "sigan",
-  "license": "MIT",
+  "license": "CC BY-NC-SA 4.0",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
