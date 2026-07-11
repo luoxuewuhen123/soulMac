@@ -427,7 +427,7 @@ function startServer() {
           }
           // 提示放在最前面，AI 更容易注意到
           if (offset + maxLines < total && maxLines !== Infinity)
-            result = `⚠️ 文件共${total}行，本次仅显示第${offset+1}-${endLine}行，还有${total-endLine}行未读！请立即用 offset=${endLine} 调 read_file 继续读取剩余部分\n\n` + result;
+            result = `⚠️ 文件共${total}行，本次仅显示第${offset+1}-${endLine}行，还有${total-endLine}行未读！请立即用 read_files 传 offset=${endLine} 继续读取剩余部分\n\n` + result;
           else
             result = `✅ 已读取全部${total}行（第${offset+1}-${endLine}行）\n\n` + result;
           res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -455,7 +455,6 @@ function startServer() {
               } catch(e) { res.writeHead(404); res.end(JSON.stringify({ error: '图片读取失败: ' + e.message })); }
               return;
             }
-            // PDF/DOCX 文档解析已移除，由 MCP 工具接管
             res.writeHead(400); res.end(JSON.stringify({ error: '不支持的格式（仅支持图片）: ' + ext }));
           } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid json' })); }
         });
@@ -611,7 +610,7 @@ function startServer() {
         const UA = `Mozilla/5.0 (${osStr}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36`;
         // 搜索引擎：Bing（国内可访问）
         const engines = [
-          { name: 'Bing', url: `https://www.bing.com/search?q=${encodeURIComponent(q)}`, parse: parseBing },
+          { name: 'Bing', url: `https://cn.bing.com/search?q=${encodeURIComponent(q)}`, parse: parseBing },
         ];
         let idx = 0;
         function tryNext(errMsg) {
@@ -640,21 +639,35 @@ function startServer() {
         tryNext();
         return;
       }
-      // 搜索解析器：Bing
+      // 搜索解析器：Bing（兼容新旧 HTML 结构，含 cn.bing.com）
       function parseBing(html, count) {
         const results = [];
-        // Bing 搜索结果：<li class="b_algo"> 下 <h2><a href="...">title</a></h2> + <p>snippet</p>
-        const algoRe = /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/g;
-        let m;
-        while ((m = algoRe.exec(html)) !== null && results.length < count) {
-          const block = m[1];
-          const aMatch = block.match(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/);
-          if (!aMatch) continue;
-          const url = aMatch[1];
-          const title = aMatch[2].replace(/<[^>]+>/g, '').trim();
-          if (!title || url === 'javascript:void(0)') continue;
-          const snippet = block.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().replace(title, '').trim().substring(0, 300);
-          results.push({ title, url, snippet });
+        // 尝试多种搜索结果的容器选择器（Bing 经常改版）
+        // 旧版：<li class="b_algo">  新版：<li class="b_algo"> 或 <div class="b_tpcn"> 等
+        const patterns = [
+          /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/g,
+          /<li[^>]*class="b_ans"[^>]*>([\s\S]*?)<\/li>/g,
+          /<div[^>]*class="b_tpcn"[^>]*>([\s\S]*?)<\/div>/g,
+          /<div[^>]*class="b_caption"[^>]*>([\s\S]*?)<\/div>/g,
+        ];
+        let matchedBlocks = new Set();
+        for (const re of patterns) {
+          let m;
+          while ((m = re.exec(html)) !== null) {
+            const block = m[1];
+            const sig = block.substring(0, 100);
+            if (matchedBlocks.has(sig)) continue;
+            matchedBlocks.add(sig);
+            const aMatch = block.match(/<a[^>]*href="(https?:\/\/[^"]*)"[^>]*>([\s\S]*?)<\/a>/);
+            if (!aMatch) continue;
+            const url = aMatch[1];
+            const title = aMatch[2].replace(/<[^>]+>/g, '').trim();
+            if (!title || url === 'javascript:void(0)') continue;
+            const snippet = block.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().replace(title, '').trim().substring(0, 300);
+            results.push({ title, url, snippet });
+            if (results.length >= count) break;
+          }
+          if (results.length >= count) break;
         }
         return results;
       }
@@ -815,7 +828,7 @@ function startServer() {
             const resolved = safePath(fp);
             if (!resolved) { res.writeHead(403); res.end(JSON.stringify({error:'操作被拒绝：只能在「' + WORKSPACE + '」内操作'})); return; }
             // 文件大小预检：超过20MB拒绝patch（split/indexOf在大文件上性能极差）
-            try { const st = fs.statSync(resolved); if (st.size > 20 * 1024 * 1024) { res.writeHead(413); res.end(JSON.stringify({error:'文件过大（' + (st.size/1024/1024).toFixed(1) + 'MB），超过20MB，请手动编辑或用bash处理'})); return; } } catch(e) { res.writeHead(404); res.end(JSON.stringify({error:'文件不存在: ' + e.message})); return; }
+            try { const st = fs.statSync(resolved); if (st.size > 20 * 1024 * 1024) { res.writeHead(413); res.end(JSON.stringify({error:'文件过大（' + (st.size/1024/1024).toFixed(1) + 'MB），超过20MB，无法做精确替换'})); return; } } catch(e) { res.writeHead(404); res.end(JSON.stringify({error:'文件不存在: ' + e.message})); return; }
             fs.readFile(resolved, (e, buf) => { const content = decodeText(buf);
               if (e) { res.writeHead(404); res.end(JSON.stringify({error:'文件无法读取: ' + e.message})); return; }
               // 先计算所有 patch 的位置（在原始内容中），再依次替换
@@ -889,7 +902,6 @@ function startServer() {
         });
         return;
       }
-      // 文档生成与原地编辑（/create-document、/edit-document）已移除，由 MCP 工具接管
       // 删除文件
       if (req.method === 'POST' && req.url === '/delete-file') {
         readBody(req).then(body => {
@@ -905,100 +917,6 @@ function startServer() {
               res.end(JSON.stringify({ success: true }));
             });
           } catch(e) { res.writeHead(400); res.end('{"error":"invalid json"}'); }
-        });
-        return;
-      }
-      // 符号重命名（搜索整个项目 + 精确替换）
-      if (req.method === 'POST' && req.url === '/rename-symbol') {
-        readBody(req).then(body => {
-          try {
-            const { oldName, newName, searchPath, fileType } = JSON.parse(body);
-            if (!oldName || !newName) { res.writeHead(400); res.end(JSON.stringify({ error: '缺少参数 oldName/newName' })); return; }
-            const resolved = safePath(searchPath || '.');
-            if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: '路径不允许' })); return; }
-            // 用正则严格匹配单词边界，避免子串误伤（如 forgetData 不会被 getData 匹配到）
-            const re = new RegExp('\\b' + oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'g');
-            const results = [];
-            (async () => {
-              async function walk(dir) {
-                let entries;
-                try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch(e) { return; }
-                for (const e of entries) {
-                  if (e.name.startsWith('.') || e.name === 'node_modules') continue;
-                  const fp = path.join(dir, e.name);
-                  if (e.isDirectory()) { await walk(fp); continue; }
-                  if (fileType && path.extname(e.name).toLowerCase() !== '.' + fileType.replace(/^\./, '')) continue;
-                  const SEARCH_EXTS = ['.js','.jsx','.mjs','.cjs','.ts','.tsx','.vue','.html','.css','.scss','.less','.json','.xml','.yaml','.yml','.md','.py','.java','.go','.rs','.rb','.php','.c','.cpp','.h','.hpp','.swift','.kt','.dart','.lua','.pl','.sh','.bat','.ps1'];
-                  if (!SEARCH_EXTS.includes(path.extname(e.name).toLowerCase())) continue;
-                  try {
-                    const st = fs.statSync(fp);
-                    if (st.size > 10 * 1024 * 1024) continue; // 跳过 >10MB 的大文件
-                    const buf = await fs.promises.readFile(fp); const content = decodeText(buf);
-                    if (!re.test(content)) continue;
-                    re.lastIndex = 0;
-                    const lines = content.split('\n');
-                    const matches = [];
-                    for (let i = 0; i < lines.length; i++) {
-                      let m; re.lastIndex = 0;
-                      while ((m = re.exec(lines[i])) !== null) {
-                        matches.push({ line: i + 1, column: m.index + 1, content: lines[i].trim() });
-                      }
-                    }
-                    if (matches.length === 0) continue;
-                    const relPath = path.relative(resolved, fp);
-                    const newContent = content.replace(re, newName);
-                    results.push({ file: relPath, matches, newContent, oldContent: content });
-                  } catch(e) {}
-                }
-              }
-              await walk(resolved);
-              if (results.length === 0) {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ changed: 0, files: [], message: '未找到符号 "' + oldName + '" 的引用' }));
-                return;
-              }
-              // 写入所有修改 + 语法检查
-              let changed = 0, totalOccurrences = 0;
-              const changes = [];
-              for (const r of results) {
-                totalOccurrences += r.matches.length;
-                try {
-                  const targetPath = safePath(r.file) || path.join(resolved, r.file);
-                  await fs.promises.writeFile(targetPath, r.newContent, 'utf-8');
-                  changed++;
-                  // 对该文件执行语法检查
-                  const lintResult = await new Promise(resolve => {
-                    lintFile(targetPath, (e, lint) => resolve(lint));
-                  });
-                  changes.push({
-                    file: r.file,
-                    occurrences: r.matches.length,
-                    // 每处变更的行级详情（最多展示前 20 处，避免反馈过长）
-                    details: r.matches.slice(0, 20).map(m => ({
-                      line: m.line,
-                      column: m.column,
-                      snippet: m.content.length > 60 ? m.content.substring(0, 60) + '...' : m.content,
-                    })),
-                    hasMore: r.matches.length > 20,
-                    lint: lintResult || null,
-                  });
-                } catch(e) {
-                  changes.push({ file: r.file, occurrences: r.matches.length, error: e.message, lint: null });
-                }
-              }
-              const detailMsg = changed > 0
-                ? '已将 "' + oldName + '" → "' + newName + '"（' + changed + ' 个文件，' + totalOccurrences + ' 处）\n\n' + changes.map(c =>
-                    '📄 ' + c.file + '（' + c.occurrences + ' 处）' +
-                    (c.lint ? (c.lint.ok ? ' ✅ 语法正常' : ' ❌ ' + c.lint.output.substring(0, 200)) : '') +
-                    (c.error ? ' ❌ ' + c.error : '') +
-                    '\n' + (c.details || []).slice(0, 5).map(d => '  L' + d.line + ':' + d.column + ' ' + d.snippet).join('\n') +
-                    (c.hasMore ? '\n  ... 还有 ' + (c.occurrences - 5) + ' 处' : '')
-                  ).join('\n\n')
-                : '未找到符号 "' + oldName + '" 的引用';
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ changed, totalOccurrences, changes, message: detailMsg }));
-            })();
-          } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid json' })); }
         });
         return;
       }

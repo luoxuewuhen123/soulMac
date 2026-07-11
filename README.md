@@ -52,24 +52,25 @@
 - 流式 SSE 实时回复
 - 深度思考模式（思维链展示）
 - 多模态视觉识别（模型支持时可看图）
+- TypeScript/Vue 语法检查（写入后自动 lint）
 - 中断机制（随时打断 AI 回复）
-- 聊天历史 + 自动摘要
+- 聊天历史 + 自动摘要 + 工作记忆
 
 ### 🛠️ 内置工具（AI 自动调用）
 | 工具 | 功能 |
 |------|------|
-| `read_files` | 读取一个或多个文件（支持 paths 数组批量读，图片自动识别为视觉数据，lines/offset 分页） |
-| `edit_file` | 修改文件：content 整体覆盖或 patches SEARCH/REPLACE 精确替换，写入后自动语法检查 |
-| `delete_files` | 永久删除一个或多个文件（paths 数组） |
-| `replace` | 跨文件批量替换纯文本（wholeWord 按单词边界精确重命名），替换后自动语法检查 |
-| `search` | 全文搜索（关键词/正则，上下文预览，文件级统计） |
+| `read_files` | 读取一个或多个文件（支持 paths 数组批量读，图片自动识别，默认读前2000行，截断时提示用 offset 续读） |
+| `edit_file` | content 整体覆盖 或 patches SEARCH/REPLACE（old 须唯一），写入后自动 lint |
+| `delete_files` | 永久删除一个或多个文件（paths 数组），文件不存在不会报错 |
+| `replace` | 跨文件批量替换纯文本（非正则），wholeWord 精确重命名，替换后自动 lint |
+| `search` | 全文搜索（关键词/正则），上下文预览，文件级统计 |
 | `search_file` | 按文件名通配符模式搜索 |
 | `tree` | 递归目录树（可限深度、忽略目录） |
-| `run_js` | 在项目目录下执行 JS 代码（Node.js），适合自定义计算或调用 node_modules |
-| `lint_file` | 语法检查（lint），支持 JS/TS/Vue/Python/HTML/CSS/XML/YAML/Shell，其他文件类型有通用括号/引号平衡兜底 |
-| `web` | 搜索互联网（q）或抓取网页内容（url），一个工具代替两个 |
+| `run_js` | 在项目目录下执行 JS 代码（Node.js），后备用 |
+| `lint_file` | 语法检查，支持 JS/TS/Vue/Py/HTML/CSS/XML/YAML/Shell，未覆盖类型有通用平衡兜底 |
+| `web` | 搜索互联网（cn.bing.com）或抓取网页内容 |
 | `mkdir` | 递归创建目录 |
-| `rename_file` | 重命名或移动文件/目录 |
+| `rename_file` | 重命名或移动文件/目录，目标父目录需先存在（可用 mkdir） |
 
 ### 🧩 拓展工具（MCP 协议）
 通过 MCP（Model Context Protocol）安装第三方工具包，扩展 AI 能力：
@@ -155,9 +156,9 @@ npm run dist:all
 ### 文件操作
 | 工具 | 描述 | 反馈质量 |
 |------|------|---------|
-| `read_files` | 批量读文件（paths 数组），自动识别图片，lines/offset 分页 | ⭐ 优秀：文件路径+行数明细 |
-| `edit_file` | content 覆盖写 或 patches SEARCH/REPLACE 精确替换，写入后自动 lint | ⭐ 优秀：变更行号明细、语法检查结果、未匹配项提示 |
-| `delete_files` | 永久删除一个或多个文件（paths 数组） | ✅ 可靠 |
+| `read_files` | 批量读文件（paths 数组），自动识别图片，默认读前2000行，截断时提示 | ⭐ 优秀：文件路径+行数明细 |
+| `edit_file` | content 覆盖写 或 patches SEARCH/REPLACE（old须唯一），写入后自动 lint | ⭐ 优秀：变更行号明细、语法检查结果、未匹配项提示 |
+| `delete_files` | 永久删除一个或多个文件（paths 数组），文件不存在不会报错 | ✅ 可靠 |
 | `replace` | 跨文件批量替换纯文本（非正则），wholeWord 精确重命名 | ⭐ 优秀：变更文件/行级明细 + 语法检查 |
 | `rename_file` | 重命名或移动文件/目录 | ✅ 可靠 |
 | `mkdir` | 递归创建目录 | ✅ 可靠 |
