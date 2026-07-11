@@ -42,6 +42,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f9f9fb;font:13px/1.
 #msgs .msg.tool .read-summary summary{cursor:pointer;user-select:none;color:#559966;font-size:11px;outline:none}
 #msgs .msg.tool .read-summary ul{margin:4px 0 0;padding-left:18px;list-style:disc}
 #msgs .msg.tool .read-summary li{color:#667799;font-size:11px;word-break:break-word;max-width:100%}
+#msgs .msg.tool .edit-summary{display:block;padding:4px 10px;line-height:1.6}
+#msgs .msg.tool .edit-summary summary{cursor:pointer;user-select:none;color:#b58900;font-size:11px;outline:none}
+#msgs .msg.tool .edit-summary ul{margin:4px 0 0;padding-left:18px;list-style:disc}
+#msgs .msg.tool .edit-summary li{color:#667799;font-size:11px;word-break:break-word;max-width:100%}
+#msgs .msg.tool .edit-summary li>ul{margin:2px 0 2px 14px;padding-left:14px;list-style:circle}
+#msgs .msg.tool .edit-summary li>ul li{color:#998866}
 </style></head>
 <body>
 <div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>💬 与茵茵聊天</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
@@ -284,6 +290,8 @@ window.api?.onFromPetWindow(data=>{
     // 有 id 时复用已有行，否则创建新行
     let div=null;
     if(data.id){div=$('msgs').querySelector('[data-tid="'+data.id+'"]');}
+    // 若该行已是汇总结果（读取/编辑），后续无汇总数据的状态（如"正在…"）不应覆盖它
+    if(div && (div.classList.contains('ok')||div.classList.contains('err')) && !data.reads && !data.edits) return;
     if(!div){
       div=document.createElement('div');
       div.className='msg tool';
@@ -294,35 +302,54 @@ window.api?.onFromPetWindow(data=>{
         $('msgs').appendChild(div);
       }
     }
-    // 读取汇总：可折叠展示读取了哪些文件、哪些行
+    // 读取汇总：带图标和状态，加载时转圈，完成后对号
     if(data.reads){
-      const d=document.createElement('details');
-      d.className='read-summary';
-      const sum=document.createElement('summary');
-      sum.textContent=data.text+'（点击展开）';
-      d.appendChild(sum);
-      const ul=document.createElement('ul');
+      div.className='msg tool'+(data.ok?' ok':data.err?' err':'');
+      div.textContent='';
+      const ico=document.createElement('span');
+      ico.className='ts-ico'+(data.ok||data.err?'':' ts-spin');
+      ico.textContent=data.ok?'✅':data.err?'❌':'';
+      div.appendChild(ico);
+      const txtSpan=document.createElement('span');
+      let txt=data.text||'';
       data.reads.forEach(r=>{
-        const li=document.createElement('li');
-        li.textContent=r.path+(r.lines?(' — '+r.lines):'');
-        ul.appendChild(li);
+        txt+='\n  📄 '+r.path+(r.lines?(' ('+r.lines+')'):'');
       });
-      d.appendChild(ul);
-      div.innerHTML='';
-      div.appendChild(d);
-      div.className='msg tool ok';
+      txtSpan.textContent=txt;
+      div.appendChild(txtSpan);
       $('msgs').scrollTop=$('msgs').scrollHeight;
       return;
     }
-    // 更新内容和状态
-    div.className='msg tool'+(data.ok?' ok':data.err?' err':'');
-    if(data.ok||data.err){
-      const txt=data.text.replace(/^[✓✗]\s*/,'');
-      div.innerHTML='<span class="ts-ico">'+(data.ok?'✅':'❌')+'</span><span>'+txt+'</span>';
-    }else{
-      const txt=data.text.replace(/\.\.\.$/,'');
-      div.innerHTML='<span class="ts-ico ts-spin"></span><span>'+txt+'</span>';
+    // 编辑/写入汇总：带图标和状态
+    if(data.edits){
+      div.className='msg tool'+(data.ok?' ok':data.err?' err':'');
+      div.textContent='';
+      const ico=document.createElement('span');
+      ico.className='ts-ico'+(data.ok||data.err?'':' ts-spin');
+      ico.textContent=data.ok?'✅':data.err?'❌':'';
+      div.appendChild(ico);
+      const txtSpan=document.createElement('span');
+      let txt=data.text||'';
+      data.edits.forEach(e=>{
+        txt+='\n  📄 '+e.path+(e.note?(' — '+e.note):'');
+      });
+      txtSpan.textContent=txt;
+      div.appendChild(txtSpan);
+      $('msgs').scrollTop=$('msgs').scrollHeight;
+      return;
     }
+    // 更新内容和状态（用 textContent 而非 innerHTML，避免参数里的 < & " 破坏渲染）
+    div.className='msg tool'+(data.ok?' ok':data.err?' err':'');
+    div.textContent='';
+    const ico=document.createElement('span');
+    ico.className='ts-ico'+(data.ok||data.err?'':' ts-spin');
+    ico.textContent=data.ok?'✅':data.err?'❌':'';
+    const txtSpan=document.createElement('span');
+    txtSpan.textContent=data.ok||data.err
+      ? data.text.replace(/^[✓✗]\s*/,'')
+      : data.text.replace(/\.\.\.$/,'');
+    div.appendChild(ico);
+    div.appendChild(txtSpan);
     $('msgs').scrollTop=$('msgs').scrollHeight;
   }
   if(data.type==='ai-thinking'){

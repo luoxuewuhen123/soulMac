@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('api', {
   sendToChatWindow: data => ipcRenderer.send('pet-to-chat', data),
   onAiCfgWindowClosed: cb => ipcRenderer.on('ai-cfg-window-closed', () => cb()),
   onPetCfgWindowClosed: cb => ipcRenderer.on('pet-cfg-window-closed', () => cb()),
+  updatePetCfgLive: partial => ipcRenderer.send('update-pet-cfg-live', partial),
+  onPetCfgLive: cb => ipcRenderer.on('pet-cfg-live', (_, partial) => cb(partial)),
 
   sendToPetWindow: data => ipcRenderer.send('chat-to-pet', data),
   onFromPetWindow: cb => ipcRenderer.on('from-pet-window', (_, data) => cb(data)),

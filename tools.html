@@ -44,17 +44,18 @@ html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:
 <div id="footer">改动即时保存，下次对话生效 · 视觉类工具由模型是否支持视觉自动判断</div>
 <script>
 const TOOLS = [
-  {name:'read_file', icon:'📖', label:'读取文件', desc:'读取文件：纯文本/代码（自动识别图片），支持 offset/lines 分段读取'},
-  {name:'apply_patch', icon:'✏️', label:'编辑文件', desc:'用「查找→替换」精准修改文件中的一段文本，不碰其他内容'},
-  {name:'write_file', icon:'📝', label:'写入文件', desc:'新建或整体覆盖纯文本/代码文件'},
-  {name:'delete_file', icon:'🗑️', label:'删除文件', desc:'删除指定文件'},
+  {name:'read_files', icon:'📖', label:'读取文件', desc:'读取一个或多个文件内容（纯文本/代码，自动识别图片），支持 paths 数组一次读多个'},
+  {name:'edit_file', icon:'✏️', label:'编辑文件', desc:'覆盖写入（content）或 SEARCH/REPLACE（patches），写入后自动检查语法'},
+  {name:'delete_files', icon:'🗑️', label:'删除文件', desc:'删除一个或多个文件（paths 数组），不可恢复'},
+  {name:'replace', icon:'🔁', label:'批量替换', desc:'跨文件搜索替换，wholeWord=true 精确重命名变量/函数，全项目自动替换+语法检查'},
   {name:'search', icon:'🔍', label:'搜索代码', desc:'搜索代码/文本中的关键词或正则，返回匹配行及上下文'},
-  {name:'search_file', icon:'🔍', label:'搜索文件', desc:'按文件名模式搜索文件（支持通配符 * ?），如 *.html、*test*'},
+  {name:'search_file', icon:'🔍', label:'搜索文件', desc:'按文件名通配符搜索文件（*.html、*test*）'},
   {name:'tree', icon:'🌳', label:'目录树', desc:'递归查看项目结构，可限制深度、忽略噪音目录'},
-  {name:'bash', icon:'💻', label:'执行命令', desc:'在终端执行 shell 命令并取回输出（Windows 用 PowerShell）。能力最强，可按需关闭'},
-  {name:'web_search', icon:'🔍', label:'搜索网页', desc:'搜索互联网，返回相关网页标题/链接/摘要，适合查文档、搜资料'},
-  {name:'web_fetch', icon:'🌐', label:'抓取网页', desc:'抓取网页文字内容，适合查文档、搜资料'},
-  {name:'rename_symbol', icon:'🔁', label:'符号重命名', desc:'将代码中的函数名/变量名/类名精确重命名（按单词边界匹配，不误伤子串），自动搜索整个项目并全部替换'},
+  {name:'run_js', icon:'▶️', label:'执行 JS', desc:'在项目目录下执行 JS 代码处理文件，不接触 shell'},
+  {name:'lint_file', icon:'🔬', label:'语法检查', desc:'对 JS/TS/Vue/Python/HTML/CSS 文件做语法检查，返回错误行列号'},
+  {name:'web', icon:'🌐', label:'互联网', desc:'搜索互联网（q）或抓取网页内容（url），一个工具代替两个'},
+  {name:'mkdir', icon:'📁', label:'创建目录', desc:'创建目录（递归创建多级不存在的父目录）'},
+  {name:'rename_file', icon:'🔁', label:'移动/重命名', desc:'重命名或移动文件/目录'},
 ];
 
 let disabled = new Set();

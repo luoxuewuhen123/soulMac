@@ -270,8 +270,6 @@ getEl('drag').addEventListener('click',e=>{
   }
 });
 
-// 拖拽功能已禁用
-let _isDragging=false;
 
 // 参数控制（使用 index 缓存避免重复线性查找）
 let _paramCache={};
@@ -314,7 +312,6 @@ function showBubble(t,expRaw,dur,skipChat,seq){
   bubbleHover=false;
   _hoverArmed=false;
   setTimeout(()=>{_hoverArmed=true;},350);
-  if(_isDragging)return; // 拖拽中不显示气泡
   // 只显示最新一次点击/调用产生的气泡，避免旧请求（如更早的 TTS）覆盖或顶掉新气泡
   if(seq!==undefined&&seq!==bubbleSeq)return;
   // 清除旧语音的关闭回调，防止错误隐藏新气泡
@@ -698,18 +695,19 @@ async function callAI(messages, signal, tools, enableThinking) {
 // 工具定义 - 每个工具独立
 function makeTools(){
   const all=[
-  {type:'function',function:{name:'read_file',description:'读取文件：纯文本/代码（自动识别图片并转为视觉数据）；支持 offset 和 lines 分段读取大文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},offset:{type:'number',description:'跳过前N行，从第offset行开始读'},lines:{type:'number',description:'读取行数，不传则读全部（大文件配合offset+lines分段读取）'}},required:['path'],additionalProperties:false}}},
-  {type:'function',function:{name:'apply_patch',description:'用 SEARCH/REPLACE 精准修改文件中的一段文本（old → new），要修改多处就多次调用此工具',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},old:{type:'string',description:'要查找的旧文本（必须在文件中唯一）'},new:{type:'string',description:'替换成的新文本'}},required:['path','old','new'],additionalProperties:false}}},
-  {type:'function',function:{name:'write_file',description:'新建或覆盖写入纯文本/代码文件；写入后自动语法检查',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'},content:{type:'string',description:'完整文件内容'}},required:['path','content'],additionalProperties:false}}},
-  {type:'function',function:{name:'delete_file',description:'删除文件',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'read_files',description:'读取一个或多个文件的内容（纯文本/代码，自动识别图片转为视觉数据）。传 paths 数组一次读多个，比逐个读更快。支持 lines/offset 分页。超过50MB的文件会被拒绝。',strict:true,parameters:{type:'object',properties:{paths:{type:'array',description:'要读取的文件路径列表，如 ["src/index.js", "src/utils.js"]',items:{type:'string'}},offset:{type:'number',description:'起始行号（0-based），所有文件都用同一 offset，默认0'},lines:{type:'number',description:'读取行数，默认2000，超出截断（配合 offset 分段读大文件）'}},required:['paths'],additionalProperties:false}}},
+  {type:'function',function:{name:'replace',description:'跨文件批量替换文本：在所有文件中搜索纯文本（非正则），全部替换为指定内容。wholeWord=true 按单词边界精确匹配（适合重命名变量/函数），wholeWord=false 简单文本替换。替换后自动语法检查。',strict:true,parameters:{type:'object',properties:{pattern:{type:'string',description:'要搜索的纯文本（不是正则表达式，如需正则请用 search 工具）'},replacement:{type:'string',description:'替换后的文本'},wholeWord:{type:'boolean',description:'true=精确符号匹配（自动加单词边界，适合函数名/变量名重命名），false/省略=简单文本替换'},path:{type:'string',description:'可选，搜索目录，不传则搜整个工作空间'},fileType:{type:'string',description:'可选，限定文件类型扩展名，如 js/py/html，不传则搜所有代码文件'}},required:['pattern','replacement'],additionalProperties:false}}},
+  {type:'function',function:{name:'edit_file',description:'修改文件内容。两种模式：① content —— 整体覆盖写入，适合新建文件或大段改写的场景。② patches —— 精确 SEARCH/REPLACE，适合只改几行的场景，每项的 old 必须与文件原文精确匹配（含换行符），不匹配则该处替换跳过。也可同时传 patches + content，顺序：先做 patches 替换，再写入最终的 content。写入后自动语法检查。注意：content 上限约5MB，patches 建议一次不超过20处。',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'文件路径（必填）'},content:{type:'string',description:'整体覆盖写入的完整内容。新建文件或要大段重写时用这个，不要用 patches 做大面积替换'},patches:{type:'array',description:'SEARCH/REPLACE 替换列表。只改几行时用这个，不要用它做大面积替换。每项含 {old, new}，old 必须与原文精确匹配（含空格和换行符），不匹配则该处静默跳过',items:{type:'object',properties:{old:{type:'string',description:'要查找的旧文本，必须精确匹配文件原文（含空格/换行/缩进），不匹配则跳过'},new:{type:'string',description:'替换成的新文本'}},required:['old','new'],additionalProperties:false}}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'delete_files',description:'⚠️ 永久删除一个或多个文件（不可恢复！请谨慎使用），仅删除文件不删除目录。传 paths 数组一次删多个。请先确认文件确实不需要了再执行。',strict:true,parameters:{type:'object',properties:{paths:{type:'array',description:'要删除的文件路径列表',items:{type:'string'}}},required:['paths'],additionalProperties:false}}},
+  {type:'function',function:{name:'mkdir',description:'创建目录（支持递归创建多级不存在的父目录）。新建项目需要先创建目录结构再写入文件。',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径（如 src/components）'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'rename_file',description:'重命名或移动文件/目录。注意：移动文件时目标路径的父目录必须已存在。',strict:true,parameters:{type:'object',properties:{oldPath:{type:'string',description:'原路径'},newPath:{type:'string',description:'新路径'}},required:['oldPath','newPath'],additionalProperties:false}}},
 
-  {type:'function',function:{name:'search',description:'搜索代码/文本中的关键词或正则表达式（grep 模式），返回匹配行及上下文',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词或正则表达式'},path:{type:'string',description:'搜索路径，不传则搜整个工作空间'},context:{type:'number',description:'上下文行数，默认2'},caseSensitive:{type:'boolean',description:'是否区分大小写，默认 false'},type:{type:'string',description:'文件类型过滤，如 js/py/html/txt 等，不传则搜全部'}},required:['q'],additionalProperties:false}}},
-  {type:'function',function:{name:'search_file',description:'按文件名模式搜索文件（支持通配符 * ?），如 *.html、*.js、*test*',strict:true,parameters:{type:'object',properties:{pattern:{type:'string',description:'文件匹配模式，如 *.html、*test*、*.{ts,tsx}'},path:{type:'string',description:'搜索目录，不传则搜工作空间'},recursive:{type:'boolean',description:'是否递归搜索子目录，默认true'}},required:['pattern'],additionalProperties:false}}},
-  {type:'function',function:{name:'tree',description:'递归显示目录树（一步看清项目结构）, maxDepth 默认3 最大6',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径，默认当前目录'},maxDepth:{type:'number',description:'最大递归深度，默认3，最大6'},ignore:{type:'array',description:'忽略的目录/文件列表',items:{type:'string'}}},required:[],additionalProperties:false}}},
-  {type:'function',function:{name:'bash',description:'执行 shell 命令并返回输出（Windows 下使用 PowerShell，注意：PowerShell命令不是cmd命令），支持中文/emoji 路径',strict:true,parameters:{type:'object',properties:{command:{type:'string',description:'要执行的命令（Windows 下用 PowerShell 语法，不支持 &&）'}},required:['command'],additionalProperties:false}}},
-  {type:'function',function:{name:'web_search',description:'搜索互联网，获取相关网页标题/链接/摘要',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词'},count:{type:'number',description:'返回结果数，默认5，最大10'}},required:['q'],additionalProperties:false}}},
-  {type:'function',function:{name:'web_fetch',description:'抓取网页文字，获取文档/资料信息',strict:true,parameters:{type:'object',properties:{url:{type:'string',description:'完整 URL（含 https://）'}},required:['url'],additionalProperties:false}}},
-  {type:'function',function:{name:'rename_symbol',description:'符号重命名：将代码中的函数名/变量名/类名等精确重命名（按单词边界匹配，不误伤子串），会搜索工作空间内所有代码文件并全部替换',strict:true,parameters:{type:'object',properties:{oldName:{type:'string',description:'旧符号名（如 getUserInfo）'},newName:{type:'string',description:'新符号名（如 fetchUserProfile）'},searchPath:{type:'string',description:'搜索目录，不传则搜整个工作空间'},fileType:{type:'string',description:'限定文件类型扩展名，如 js/py/html，不传则搜所有代码文件'}},required:['oldName','newName'],additionalProperties:false}}},
+  {type:'function',function:{name:'search',description:'搜索项目内所有文件中的关键词或正则表达式（支持所有文本类型，包括子目录），返回匹配行及上下文。最多返回500条结果，大文件（>10MB）自动跳过。',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词或正则表达式（注意：复杂正则可能导致超时）'},path:{type:'string',description:'搜索路径，不传则搜整个工作空间'},context:{type:'number',description:'上下文行数，默认2'},caseSensitive:{type:'boolean',description:'是否区分大小写，默认 false'},type:{type:'string',description:'文件类型过滤，如 js/py/html/txt 等，不传则搜全部'}},required:['q'],additionalProperties:false}}},
+  {type:'function',function:{name:'search_file',description:'按文件名模式搜索文件（支持通配符 * ?），返回文件路径列表。如 *.html、*test*、*.{ts,tsx}。注意：不会显示文件大小和内容，找到文件后请用 read_files 或 tree 查看。',strict:true,parameters:{type:'object',properties:{pattern:{type:'string',description:'文件匹配模式，如 *.html、*test*、*.{ts,tsx}'},path:{type:'string',description:'搜索目录，不传则搜工作空间'},recursive:{type:'boolean',description:'是否递归搜索子目录，默认true'}},required:['pattern'],additionalProperties:false}}},
+  {type:'function',function:{name:'tree',description:'递归显示目录树（一步看清项目结构）。maxDepth 默认3 最大6，最多显示600项。超出600项时部分目录会省略，可用更小的范围查看子目录详情。',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'目录路径，默认当前目录'},maxDepth:{type:'number',description:'最大递归深度，默认3，最大6'},ignore:{type:'array',description:'忽略的目录/文件列表',items:{type:'string'}}},required:[],additionalProperties:false}}},
+  {type:'function',function:{name:'run_js',description:'在项目目录下执行一段 JavaScript 代码（Node.js），不接触 shell。适合：需要自定义计算/分析逻辑时的后备方案，或用 require 调用 node_modules 包。如果传了 file，代码中可直接使用变量 __file（文件绝对路径）和 __content（文件内容字符串）。',strict:true,parameters:{type:'object',properties:{code:{type:'string',description:'要执行的 JavaScript 代码。可用 require 加载模块。如果传了 file，代码中自动有 __file（路径）和 __content（文件内容）两个变量可用'},file:{type:'string',description:'可选，要处理的文件路径。传了则自动读取文件内容，代码中可通过 __content 拿到文件内容字符串'}},required:['code'],additionalProperties:false}}},
+  {type:'function',function:{name:'lint_file',description:'对单个文件进行语法检查（lint）。支持 JS/TS/Vue/Python/HTML/CSS/XML/YAML/Shell 等代码文件，其他文件类型也有通用的括号/引号平衡兜底检查。返回具体的语法错误信息（含行列号），没有错误则提示通过。排查代码错误时请优先使用此工具。',strict:true,parameters:{type:'object',properties:{path:{type:'string',description:'要检查的文件路径'}},required:['path'],additionalProperties:false}}},
+  {type:'function',function:{name:'web',description:'搜索互联网或抓取网页内容。传 q 则搜索（Bing），传 url 则抓取指定网页的文字内容（自动翻页去噪）。一个工具代替两个。',strict:true,parameters:{type:'object',properties:{q:{type:'string',description:'搜索关键词，传 q 时联网搜索获取相关网页标题/链接/摘要'},url:{type:'string',description:'要抓取的完整 URL（含 https://），传 url 时抓取该网页文字内容'},count:{type:'number',description:'仅搜索时有效：返回结果数，默认5，最大10'}},required:[],additionalProperties:false}}},
   ];
   // read_image 已合并进 read_files（按扩展名自动识别图片，视觉门控在工具内处理）
   let result = all;
@@ -745,8 +743,14 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
   let didMutate=false;
   let finalReply='';
 
-  for(let turn=0;turn<35;turn++){
+  for(let turn=0;turn<50;turn++){
     if(turn>0){
+      // 重新加载工具配置，使用户开关工具实时生效
+      await ensureToolsCfg();
+      invalidateMcpCache();
+      agentTools.length=0;
+      agentTools.push(...makeTools());
+      try{const m=await getMcpTools();if(m.length>0)agentTools.push(...m);}catch(e){}
       const hist=chatCfg.msgs||[];
       const histBlock=hist.length>0?[{role:'system',content:hist.map(x=>'【'+x.time+'】'+(x.role==='user'?'主人':'宠物')+'：'+x.content).join('\n')}]:[];
       messages.length=0;
@@ -772,154 +776,236 @@ async function runChatFullLoop(messages, agentTools, parts, signal){
     const execTcs=msg.tool_calls;
     if(execTcs.length>0){
       const mcpIcon={'browser':'🌐','docs':'📚','github':'🐙','database':'🗄️','search':'🔍','figma':'🎨','terminal':'💻','schedule':'📅','memory':'🧠','translate':'🌍','email':'📧','pdf':'📄','filesystem':'📁'};
+      // 本轮读取的文件汇总（用于聊天框折叠展示读了哪些文件/行）
+      let reads=[];
+      const readTid='reads_'+turn;
+      const readSt=(ok,err,text)=>window.api?.sendToChatWindow({id:readTid,type:'tool-status',text:text||'📖 已读取 '+reads.length+' 个文件',reads:reads.slice(),ok:ok,err:err});
+      // 本轮编辑/写入/删除/移动/创建的文件汇总（用于聊天框折叠展示改了哪些文件）
+      let edits=[];
+      const editTid='edits_'+turn;
+      const editSt=()=>window.api?.sendToChatWindow({id:editTid,type:'tool-status',text:'✏️ 已修改 '+edits.length+' 个文件/目录',edits:edits.slice(),ok:edits.every(e=>e.ok!==false)});
       async function execTC(tc){
-        const _tid=tc.id;const st=(o)=>window.api?.sendToChatWindow({id:_tid,type:'tool-status',...o});
+        const _tid=tc.id||('tc_'+Math.random().toString(36).slice(2));const st=(o)=>window.api?.sendToChatWindow({id:_tid,type:'tool-status',...o});
         const name=tc.function.name;let args;
         try{args=JSON.parse(tc.function.arguments);}catch(e){st({text:'❌ 参数解析失败',err:true});return name+': 参数解析失败: '+e.message;}
         if(ac.signal&&ac.signal.aborted)throw new DOMException('已中止','AbortError');
         let mcpServer='',mcpTool='';
         if(name.startsWith('mcp__')){const p=name.split('__');mcpServer=p[1];mcpTool=p.slice(2).join('__');}
         const isBrowser=mcpServer==='browser';
-        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_file:'📖',apply_patch:'✏️',write_file:'📝',delete_file:'🗑',search:'🔍',search_file:'🔍',tree:'🌳',bash:'💻',web_search:'🌐',web_fetch:'🌐',rename_symbol:'🔁'}[name]||'');
-        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_file:'读取',apply_patch:'编辑',write_file:'写入',delete_file:'删除',search:'搜索',search_file:'搜索文件',tree:'目录树',bash:'执行命令',web_search:'搜索网页',web_fetch:'抓取网页',rename_symbol:'重命名'}[name]||name));
-        const pathDesc=args.path||args.paths?.join(', ')||args.command||args.question||args.url||'';
+        const icon=mcpServer?mcpIcon[mcpServer]||'🧩':({read_files:'📖',edit_file:'✏️',delete_files:'🗑',replace:'🔁',search:'🔍',search_file:'🔍',tree:'🌳',run_js:'▶️',lint_file:'🔬',web:'🌐',mkdir:'📁',rename_file:'🔁'}[name]||'');
+        const label=isBrowser?'浏览网页':(mcpServer?mcpServer+': '+mcpTool:({read_files:'读取',edit_file:'编辑',delete_files:'删除',replace:'替换',search:'搜索',search_file:'搜索文件',tree:'目录树',run_js:'执行JS',lint_file:'语法检查',web:'互联网',mkdir:'创建目录',rename_file:'移动文件'}[name]||name));
+        const pathDesc=args.path||args.paths?.join(', ')||args.question||args.url||'';
         let browserUrl='';
         await new Promise(r=>setTimeout(r,50));
         try{
           if(name.startsWith('mcp__')){
+            st({text:icon+' '+label+(pathDesc?': '+pathDesc:''),ok:false});
             const r=await fetchTool('/mcp-call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,args})},{signal:ac.signal});
-            if(!r.ok){st({text:(isBrowser?'🌐 浏览网页 '+browserUrl:'✗ '+label)+' 失败',err:true});return '✗ '+name+': 请求失败';}
+            if(!r.ok){let me='';try{const mj=await r.json();me=mj.error||''}catch(_){me='HTTP '+r.status}st({text:'✗ '+label+(me?': '+me:''),err:true});return '✗ '+name+': 请求失败'+(me?': '+me:'');}
             const rd=await r.json();
-            if(rd.error){st({text:(isBrowser?'🌐 浏览网页 '+browserUrl:'✗ '+label)+' 失败',err:true});return '✗ '+name+': '+rd.error;}
-            if(isBrowser)st({text:'🌐 浏览网页 '+browserUrl+' ✓',ok:true});
+            if(rd.error){st({text:'✗ '+label+': '+rd.error,err:true});return '✗ '+name+': '+rd.error;}
+            if(isBrowser)st({text:'🌐 浏览网页 '+browserUrl,ok:true});
             else st({text:'✓ '+label,ok:true});
             return rd.result||'ok';
           }
-          if(name==='read_file'){
-            const p=args.path;
+          if(name==='read_files'){
+            const paths=args.paths||[args.path]; // 兼容旧版单 path
+            if(!paths.length){st({text:'✗ 未指定文件路径',err:true});return '✗ read_files: 未指定路径';}
+            readSt(false);
             const IMG_EXT=['.png','.jpg','.jpeg','.gif','.webp','.bmp'];
-            const ext=(p.match(/\.[^.\\\/]+$/)||[''])[0].toLowerCase();
-            // 图片：走视觉解析
-            if(IMG_EXT.includes(ext)){
-              const vision=getVisionCapability();
-              if(!vision){st({text:'⚠️ 跳过图片（模型不支持视觉）',err:true});return '⚠️ 当前模型不支持图片识别，已跳过';}
-              st({text:'🖼️ 识别图片：'+p,ok:false});
-              try{
-                const r=await fetchTool('/parse-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})},{signal:ac.signal});
-                if(!r.ok){st({text:'✗ 图片读取失败',err:true});return '✗ 图片读取失败';}
-                const rd=await r.json();
-                if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ '+rd.error;}
-                st({text:'✓ 已读取图片 '+p,ok:true});
-                return rd.type==='image'?'📷 图片数据: '+rd.data:'✓ '+p+'\n'+(rd.content||'(空)');
-              }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 读取异常',err:true});return '✗ '+e.message;}
-            }
-            // 纯文本/代码
-            st({text:'📖 读取：'+p,ok:false});
-            let u='/read-file?path='+encodeURIComponent(p);if(args.lines)u+='&lines='+args.lines;if(args.offset)u+='&offset='+args.offset;
-            const s=await fetchTool(u,{},{signal:ac.signal});
-            if(!s.ok){st({text:'✗ 读取失败 '+p,err:true});return '✗ 读取失败';}
-            let c=await s.text();
-            const hdr=c.split('\n')[0]||'';
-            let sm='';
-            const allM=hdr.match(/已读取全部(\d+)行/);
-            if(allM)sm='全部'+allM[1]+'行';
-            else{const rm=hdr.match(/第(\d+)-(\d+)行/);if(rm)sm='L'+rm[1]+'-'+rm[2];}
-            st({text:'✓ 读取 '+p+(sm?' ('+sm+')':''),ok:true});
-            return '✓ '+p+'\n'+c;
-          }
-          if(name==='apply_patch'){
-            st({text:'✏️ 编辑中：'+args.path+'...',ok:false});
-            const r=await fetchTool('/apply-patch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,patches:[{old:args.old,new:args.new}]})},{signal:ac.signal});
-            const rd=await r.json();
-            if(!r.ok||rd.error){st({text:'✗ 编辑 '+args.path,err:true});return '✗ apply_patch '+args.path+': '+(rd.error||'请求失败');}
-            didMutate=true;
-            let detail='✓ apply_patch '+args.path+' (替换了'+rd.count+'处)';
-            if(rd.changes&&rd.changes.length>0){
-              detail+='\n'+rd.changes.map(c=>{
-                const nv=(c.newFull!==undefined?c.newFull:c.new)||'';
-                return '  L'+c.line+': '+c.old+' → '+(nv.length>200?nv.substring(0,200)+'…(已截断)':nv);
-              }).join('\n');
-            }
-            if(rd.skipped&&rd.skipped.length)detail+='\n⚠️ 有'+rd.skipped.length+'处未匹配(旧文本不存在)，已跳过: '+rd.skipped.join('；');
-            if(detail.length>2000)detail=detail.substring(0,2000)+'\n...(变更详情过长已截断)';
-            if(rd.lint && rd.lint.ok!==null){
-              detail+='\n'+(rd.lint.ok?'✓ 语法检查通过':'✗ 语法错误: '+(rd.lint.output||''));
-              st({text:(rd.lint.ok?'✓ ':'✗ ')+'语法检查 '+args.path,ok:rd.lint.ok,err:!rd.lint.ok});
-            }
-            if(!rd.lint||rd.lint.ok)st({text:'✓ 编辑 '+args.path+' ('+rd.count+'处替换)',ok:true});
-            return detail;
-          }
-          if(name==='write_file'){
-            st({text:'📝 写入中：'+args.path+'...',ok:false});
-            const r=await fetchTool('/create-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,content:args.content})},{signal:ac.signal});
-            if(!r.ok){st({text:'✗ 写入 '+args.path,err:true});return '✗ write_file '+args.path+' ('+r.status+')';}
-            didMutate=true;const rd=await r.json();const lc=(args.content||'').split('\n').length;
-            let detail='✓ write_file '+args.path+' ('+lc+'行)';
-            // 语法检查结果（写入即返回，省去单独 lint 的一轮）
-            if(rd.lint && rd.lint.ok!==null){
-              detail+='\n'+(rd.lint.ok?'✓ 语法检查通过':'✗ 语法错误: '+(rd.lint.output||''));
-              st({text:(rd.lint.ok?'✓ ':'✗ ')+'语法检查 '+args.path,ok:rd.lint.ok,err:!rd.lint.ok});
-            }
-            if(!rd.lint||rd.lint.ok)st({text:'✓ 写入 '+args.path+' ('+lc+'行)',ok:true});
-            return detail;
-          }
-          if(name==='delete_file'){const r=await fetchTool('/delete-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});if(r.ok){st({text:'✓ 删除 '+args.path,ok:true});return '✓ delete_file '+args.path;}const de=await r.json().catch(()=>({}));st({text:'✗ 删除 '+args.path,err:true});return '✗ delete_file '+args.path+': '+(de.error||'请求失败');}
-          if(name==='search'){const ctx=args.context!==undefined?args.context:2;const cs=args.caseSensitive?'true':'false';const ft=args.type||'';const p=args.path||'.';const r=await fetchTool('/search?q='+encodeURIComponent(args.q)+'&context='+ctx+'&caseSensitive='+cs+'&type='+ft+(p!=='.'?'&path='+encodeURIComponent(p):''),{},{signal:ac.signal});if(r.ok){const data=await r.json();const rs=data.results||[];const fs=data.fileStats||[];st({text:'✓ 搜索 "'+args.q+'" '+rs.length+'个结果'+(data.total>rs.length?'/共'+data.total+'':''),ok:true});if(rs.length===0)return '✓ search "'+args.q+'" (0个结果)';const more=data.truncated?'\n⚠️ 结果较多（≥'+data.total+'条），仅显示前500个，建议用更精确的关键词或限定 fileType 缩小范围':'';const summary='📊 分布：'+fs.map(f=>f.file+'('+f.matches+'处)').join('、')+'\n\n';const details=rs.map(d=>'  '+d.file+':'+d.line+(ctx>0?'\n'+d.context.split('\n').map(l=>'    '+l).join('\n'):'')).join('\n---\n');if(details.length>25000)return '✓ search "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+summary+details.substring(0,25000)+'\n...(详情过长已截断)'+more;return '✓ search "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+summary+details+more;}st({text:'✗ 搜索失败',err:true});return '✗ search';}
-          if(name==='search_file'){const p=args.path||'.';st({text:'🔍 搜索文件: '+args.pattern,ok:false});const r=await fetchTool('/search-file?pattern='+encodeURIComponent(args.pattern)+'&recursive='+(args.recursive!==false)+'&path='+encodeURIComponent(p),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 搜索文件失败',err:true});return '✗ search_file: 请求失败';}const rd=await r.json();if(!rd.length){st({text:'🔍 未找到匹配 '+args.pattern+' 的文件',ok:true});return '✓ search_file "'+args.pattern+'" (0个)';}st({text:'✓ 找到 '+rd.length+' 个匹配 '+args.pattern,ok:true});return '✓ search_file "'+args.pattern+'" ('+rd.length+'个)\n'+rd.join('\n');}
-          if(name==='tree'){const path=args.path||'.';const maxDepth=args.maxDepth||3;const ignore=args.ignore||[];st({text:'🌳 目录树: '+path,ok:false});const r=await fetchTool('/tree?path='+encodeURIComponent(path)+'&maxDepth='+maxDepth+(ignore.length?'&ignore='+encodeURIComponent(ignore.join(',')):''),{},{signal:ac.signal});if(!r.ok){st({text:'✗ 目录树失败',err:true});return '✗ tree: 请求失败';}const c=await r.text();if(!c.trim()){st({text:'🌳 空目录或不存在: '+path,ok:true});return '⚠️ tree: 目录为空或不存在';}st({text:'✓ 目录树: '+path,ok:true});return c;}
-          if(name==='bash'){const cmdRaw=args.command;st({text:'💻 执行: '+cmdRaw,ok:false});const r=await fetchTool('/bash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmdRaw})},{timeout:180000,signal:ac.signal});if(!r.ok){st({text:'✗ 命令执行失败: '+cmdRaw,err:true});return '✗ bash: 执行失败';}const rd=await r.json();let output=rd.output;if(output.length>30000)output=output.substring(0,30000)+'\n...(输出过长已截断，共'+rd.output.length+'字符)';const ok=rd.code===0;st({text:(ok?'✓ 执行完成: ':'✗ 执行失败: ')+cmdRaw+(ok?' (exit:'+rd.code+')':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' bash: exit code='+rd.code+'\n'+output;}
-          if(name==='web_search'){
-            st({text:'🔍 搜索: '+args.q,ok:false});
-            try{
-              const r=await fetchTool('/web-search?q='+encodeURIComponent(args.q)+'&count='+(args.count||5),{timeout:30000,signal:ac.signal});
-              if(!r.ok){st({text:'✗ 搜索失败',err:true});return '✗ web_search: 请求失败';}
-              const rd=await r.json();
-              if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ web_search: '+rd.error;}
-              if(!rd.results||rd.results.length===0){st({text:'🔍 无搜索结果',ok:true});return '✓ web_search "'+args.q+'" (0个结果)';}
-              const res=rd.results.map(r=>'  '+r.title+'\n    '+r.url+'\n    '+r.snippet).join('\n---\n');
-              st({text:'✓ 搜索 "'+args.q+'" '+rd.results.length+'个结果',ok:true});
-              return '✓ web_search "'+args.q+'" ('+rd.results.length+'个)\n'+res;
-            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 搜索异常',err:true});return '✗ web_search: '+e.message;}
-          }
-          if(name==='web_fetch'){
-            st({text:'🌐 抓取网页: '+args.url,ok:false});
-            try{
-              // 长页面自动翻页：后端支持 maxLen/offset，逐页拉取直到取完或达到上限
-              const PAGE=16000, MAX_PAGES=5, HARD_CAP=40000;
-              let full='', offset=0, truncated=false;
-              for(let i=0;i<MAX_PAGES;i++){
-                const r=await fetchTool('/web-fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:args.url,maxLen:PAGE,offset})},{signal:ac.signal});
-                if(!r.ok){st({text:'✗ 抓取失败',err:true});return '✗ web_fetch: 请求失败';}
-                const rd=await r.json();
-                if(rd.error){st({text:'✗ 抓取失败',err:true});return '✗ web_fetch: '+rd.error;}
-                full+=(i>0?'\n...(接上一段)...\n':'')+(rd.content||'');
-                if(!rd.truncated){truncated=false;break;}
-                truncated=true; offset+=PAGE;
+            // 并行读取所有文件
+            const results=await Promise.all(paths.map(async (p)=>{
+              const ext=(p.match(/\.[^.\\\/]+$/)||[''])[0].toLowerCase();
+              if(IMG_EXT.includes(ext)){
+                const vision=getVisionCapability();
+                if(!vision) return {path:p,error:'模型不支持图片识别',skip:true};
+                try{
+                  const r=await fetchTool('/parse-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})},{signal:ac.signal});
+                  const rd=await r.json();
+                  if(!r.ok||rd.error) return {path:p,error:rd.error||'请求失败'};
+                  reads.push({path:p});
+                  return {path:p,type:'image',data:rd.data};
+                }catch(e){if(ac.signal&&ac.signal.aborted)throw e;return {path:p,error:e.message};}
               }
-              if(full.length>HARD_CAP)full=full.substring(0,HARD_CAP)+'\n...(内容过长已截断，共 '+full.length+' 字，仅展示前 '+HARD_CAP+' 字)';
-              else if(truncated)full+='\n⚠️ 网页内容较长，仅展示前 '+(MAX_PAGES*PAGE)+' 字，更后面的内容可再次抓取获取';
-              st({text:'✓ 已获取 '+args.url+(truncated?'（已自动翻页）':'')+(full.length>HARD_CAP?'（截断）':''),ok:true});
-              return full||'(空内容)';
-            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 抓取异常',err:true});return '✗ web_fetch: '+e.message;}
+              let u='/read-file?path='+encodeURIComponent(p);if(args.lines)u+='&lines='+args.lines;if(args.offset)u+='&offset='+args.offset;
+              try{
+                const s=await fetchTool(u,{},{signal:ac.signal});
+                if(!s.ok){let em='';try{const ej=await s.json();em=ej.error||''}catch(_){em='HTTP '+s.status}return {path:p,error:em};}
+                const c=await s.text();
+                const hdr=c.split('\n')[0]||'';
+                let sm='';const allM=hdr.match(/已读取全部(\d+)行/);if(allM)sm='全部'+allM[1]+'行';else{const rm=hdr.match(/第(\d+)-(\d+)行/);if(rm)sm='L'+rm[1]+'-'+rm[2];}
+                reads.push({path:p,lines:sm||undefined});
+                return {path:p,content:c};
+              }catch(e){if(ac.signal&&ac.signal.aborted)throw e;return {path:p,error:e.message};}
+            }));
+            // 合并结果
+            let out='',errs=[],imgs=[];
+            for(const r of results){
+              if(r.error){errs.push(r.path+': '+r.error);continue;}
+              if(r.skip){continue;}
+              if(r.type==='image'){imgs.push(r.data);continue;}
+              out+=r.content+'\n'; // 每个文件的内容保留原样（包含 ✅/⚠️ 文件信息头）
+            }
+            if(errs.length)readSt(true,false,'⚠️ 已读取 '+reads.length+' 个文件，部分失败: '+errs.join('；'));
+            else if(results.length===0)readSt(false,true,'✗ 读取失败');
+            else readSt(true);
+            let reply='';
+            if(out)reply=out.substring(0,50000);
+            if(imgs.length)reply+=(reply?'\n---\n':'')+'📷 图片数据: '+imgs.join('\n---\n📷 ');
+            if(errs.length)reply+=(reply?'\n---\n':'')+'⚠️ 部分读取失败:\n'+errs.join('\n');
+            if(!reply)return '⚠️ 无内容可读取';
+            if(reply.length>50000)reply=reply.substring(0,50000)+'\n...(内容过长已截断)';
+            return reply;
+          }
+          if(name==='edit_file'){
+            window.api?.sendToChatWindow({id:editTid,type:'tool-status',text:'✏️ 编辑中：'+args.path+'...',ok:false});
+            let didPatch=false,lintOk=null,lintOut='',count=0,changes=[],skipped=[];
+            // 先做 patches 替换
+            if(args.patches&&args.patches.length){
+              const pr=await fetchTool('/apply-patch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,patches:args.patches})},{signal:ac.signal});
+              const pd=await pr.json();
+              if(!pr.ok||pd.error){st({text:'✗ 替换失败 '+args.path,err:true});return '✗ edit_file (patches) '+args.path+': '+(pd.error||'请求失败');}
+              didPatch=true;count=pd.count||0;changes=pd.changes||[];skipped=pd.skipped||[];
+              const pk=pd.lint&&pd.lint.ok!==null?pd.lint.ok:null;
+              if(pk!==null){lintOk=pk;lintOut=pd.lint.output||'';}
+            }
+            // 再写入 content（如果有）
+            if(args.content!==undefined){
+              const r=await fetchTool('/create-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path,content:args.content})},{signal:ac.signal});
+              if(!r.ok){let we='';try{const wj=await r.json();we=wj.error||''}catch(_){we='HTTP '+r.status}st({text:'✗ 写入 '+args.path+(we?': '+we:''),err:true});return '✗ edit_file '+args.path+(we?': '+we:'');}
+              const rd=await r.json();const lc=(args.content||'').split('\n').length;
+              didMutate=true;
+              const rk=rd.lint&&rd.lint.ok!==null?rd.lint.ok:null;
+              if(rk!==null){lintOk=rk;lintOut=rd.lint.output||'';}
+              let detail='✓ edit_file '+args.path+' ('+lc+'行)';
+              if(count>0)detail+=' (含'+count+'处替换)';
+              if(changes.length)detail+='\n替换详情:\n'+changes.map(c=>'  L'+c.line+': "'+(c.old||'')+'" → "'+(c.new||'')+'"').join('\n');
+              if(skipped.length)detail+='\n⚠️ '+skipped.length+'处未匹配跳过';
+              if(lintOk!==null)detail+='\n'+(lintOk?'✓ 语法检查通过':'✗ 语法错误: '+lintOut);
+              edits.push({path:args.path,kind:'write',note:lc+'行'+(count>0?'+'+count+'处替换':''+(changes.length?'各处':'')),changes:[],ok:true});
+              editSt();
+              return detail;
+            }
+            // 仅 patches 模式
+            if(didPatch){
+              didMutate=true;
+              let detail='✓ edit_file '+args.path+' (替换了'+count+'处)';
+              if(changes.length)detail+='\n替换详情:\n'+changes.map(c=>'  L'+c.line+': "'+(c.old||'')+'" → "'+(c.new||'')+'"').join('\n');
+              if(skipped.length)detail+='\n⚠️ '+skipped.length+'处未匹配跳过';
+              if(lintOk!==null)detail+='\n'+(lintOk?'✓ 语法检查通过':'✗ 语法错误: '+lintOut);
+              edits.push({path:args.path,kind:'edit',note:count+'处替换',changes:[],ok:true});
+              editSt();
+              return detail;
+            }
+            st({text:'✗ 未指定 content 或 patches',err:true});return '✗ edit_file: 请传 content（覆盖写）或 patches（替换）';
+          }
+          if(name==='delete_files'){
+            const paths=[...new Set(args.paths||[args.path])]; // 去重，避免并发删同一文件误报
+            if(!paths.length){st({text:'✗ 未指定文件路径',err:true});return '✗ delete_files: 未指定路径';}
+            window.api?.sendToChatWindow({id:editTid,type:'tool-status',text:'🗑️ 删除 '+paths.length+' 个文件…',ok:false});
+            const results=await Promise.all(paths.map(async (p)=>{
+              try{
+                const r=await fetchTool('/delete-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})},{signal:ac.signal});
+                if(r.ok)return {path:p,ok:true};
+                const de=await r.json().catch(()=>({}));return {path:p,ok:false,error:de.error||'请求失败'};
+              }catch(e){if(ac.signal&&ac.signal.aborted)throw e;return {path:p,ok:false,error:e.message};}
+            }));
+            const ok=results.filter(r=>r.ok),fail=results.filter(r=>!r.ok);
+            ok.forEach(r=>edits.push({path:r.path,kind:'delete',note:'删除',changes:[],ok:true}));
+            editSt();
+            let reply='';
+            if(ok.length)reply='✓ delete_files: 已删除 '+ok.length+' 个';
+            if(fail.length)reply+=(reply?'\n':'')+'✗ '+fail.length+' 个删除失败:\n'+fail.map(f=>'  '+f.path+': '+f.error).join('\n');
+            st({text:reply||'⚠️ 删除结果为空',ok:ok.length>0,err:fail.length===paths.length});
+            return reply||'delete_files: 无结果';
+          }
+          if(name==='search'){const ctx=args.context!==undefined?args.context:2;const cs=args.caseSensitive?'true':'false';const ft=args.type||'';const p=args.path||'.';st({text:'🔍 搜索: '+args.q,ok:false});const r=await fetchTool('/search?q='+encodeURIComponent(args.q)+'&context='+ctx+'&caseSensitive='+cs+'&type='+ft+(p!=='.'?'&path='+encodeURIComponent(p):''),{},{signal:ac.signal});if(r.ok){const data=await r.json();const rs=data.results||[];const fs=data.fileStats||[];const largeNote=data.skippedLarge?`（${data.skippedLarge}个文件超过10MB已跳过）`:'';st({text:'✓ 搜索 "'+args.q+'" '+rs.length+'个结果'+largeNote,ok:true});if(rs.length===0)return '✓ search "'+args.q+'" (0个结果)'+largeNote;const more=data.truncated?'\n⚠️ 结果较多（≥'+data.total+'条），仅显示前500个，建议用更精确的关键词或限定 fileType 缩小范围':'';const summary='📊 分布：'+fs.map(f=>f.file+'('+f.matches+'处)').join('、')+'\n\n';const details=rs.map(d=>'  '+d.file+':'+d.line+(ctx>0?'\n'+d.context.split('\n').map(l=>'    '+l).join('\n'):'')).join('\n---\n');if(details.length>25000)return '✓ search "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+summary+details.substring(0,25000)+'\n...(详情过长已截断)'+more+largeNote;return '✓ search "'+args.q+'" ('+rs.length+'个'+(data.total>rs.length?'/共'+data.total:'')+')\n'+summary+details+more+largeNote;}let se='';try{const sj=await r.json();se=sj.error||''}catch(_){se='HTTP '+r.status}st({text:'✗ 搜索失败'+(se?': '+se:''),err:true});return '✗ search'+(se?': '+se:'');}
+          if(name==='search_file'){const p=args.path||'.';st({text:'🔍 搜索文件: '+args.pattern,ok:false});const r=await fetchTool('/search-file?pattern='+encodeURIComponent(args.pattern)+'&recursive='+(args.recursive!==false)+'&path='+encodeURIComponent(p),{},{signal:ac.signal});if(!r.ok){let se='';try{const sj=await r.json();se=sj.error||''}catch(_){se='HTTP '+r.status}st({text:'✗ 搜索文件失败'+(se?': '+se:''),err:true});return '✗ search_file: 请求失败'+(se?': '+se:'');}const rd=await r.json();const files=rd.files||rd;const total=rd.total||files.length;if(!files||!files.length){st({text:'🔍 未找到匹配 '+args.pattern+' 的文件',ok:true});return '✓ search_file "'+args.pattern+'" (0个)';}let result='✓ search_file "'+args.pattern+'" ('+total+'个)';if(rd.truncated)result+='\n⚠️ 结果过多，仅显示前5000个';result+='\n'+files.join('\n');st({text:'✓ 找到 '+total+' 个匹配 '+args.pattern,ok:true});return result;}
+          if(name==='tree'){const path=args.path||'.';const maxDepth=args.maxDepth||3;const ignore=args.ignore||[];st({text:'🌳 目录树: '+path,ok:false});const r=await fetchTool('/tree?path='+encodeURIComponent(path)+'&maxDepth='+maxDepth+(ignore.length?'&ignore='+encodeURIComponent(ignore.join(',')):''),{},{signal:ac.signal});if(!r.ok){let se='';try{se=await r.text()}catch(_){se='HTTP '+r.status}st({text:'✗ 目录树失败'+(se?': '+se:''),err:true});return '✗ tree'+(se?': '+se:' 请求失败');}const c=await r.text();if(!c.trim()){st({text:'🌳 空目录或不存在: '+path,ok:true});return '⚠️ tree: 目录为空或不存在';}st({text:'✓ 目录树: '+path,ok:true});return c;}
+          if(name==='run_js'){const fileArg=args.file||'';const codePrev=(args.code||'').replace(/\n/g,' ').substring(0,40)+(args.code&&args.code.length>40?'…':'');st({text:'▶️ JS: '+(fileArg||codePrev||'片段'),ok:false});const r=await fetchTool('/run-js',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:args.code,file:fileArg||undefined})},{timeout:60000,signal:ac.signal});if(!r.ok){let se='';try{const sj=await r.json();se=sj.error||''}catch(_){se='HTTP '+r.status}st({text:'✗ JS执行失败'+(se?': '+se:''),err:true});return '✗ run_js: '+se;}const rd=await r.json();let output=rd.output;const ok=rd.code===0;const label=ok?'✓ JS执行完成: ':'✗ JS执行失败: ';if(output.length>30000)output=output.substring(0,30000)+'\n...(输出过长已截断)';st({text:label+(fileArg||codePrev||'代码')+(ok?' (exit:0)':' (exit:'+rd.code+')'),ok,err:!ok});return (ok?'✓':'✗')+' run_js'+(fileArg?' '+fileArg:'')+(ok?' (exit:0)':' (exit:'+rd.code+')')+'\n'+output;}
+          if(name==='lint_file'){const p=args.path;st({text:'🔬 语法检查: '+p,ok:false});const r=await fetchTool('/lint-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})},{signal:ac.signal});if(!r.ok){let se='';try{const sj=await r.json();se=sj.error||''}catch(_){se='HTTP '+r.status}st({text:'✗ 语法检查失败'+(se?': '+se:''),err:true});return '✗ lint_file: '+se;}const rd=await r.json();if(rd.ok===null){st({text:'🔬 语法检查: '+p+' (跳过，不支持的类型)',ok:true});return '✓ lint_file '+p+': 该文件类型不支持语法检查，已跳过';}if(rd.ok){st({text:'🔬 语法检查通过: '+p,ok:true});return '✓ lint_file '+p+': 语法正确';}st({text:'🔬 语法检查未通过: '+p,err:true});return '✗ lint_file '+p+': 发现语法错误\n'+rd.output;}
+          if(name==='web'){
+            if(args.q){
+              st({text:'🔍 搜索: '+args.q,ok:false});
+              try{
+                const r=await fetchTool('/web-search?q='+encodeURIComponent(args.q)+'&count='+(args.count||5),{timeout:30000,signal:ac.signal});
+                const rd=await r.json();
+                if(!r.ok||rd.error){st({text:'✗ 搜索失败: '+(rd.error||'HTTP '+r.status),err:true});return '✗ web: '+(rd.error||'HTTP '+r.status);}
+                if(!rd.results||rd.results.length===0){st({text:'🔍 无搜索结果',ok:true});return '✓ web "'+args.q+'" (0个结果)';}
+                const res=rd.results.map(r=>'  '+r.title+'\n    '+r.url+'\n    '+r.snippet).join('\n---\n');
+                st({text:'✓ 搜索 "'+args.q+'" '+rd.results.length+'个结果',ok:true});
+                return '✓ web "'+args.q+'" ('+rd.results.length+'个)\n'+res;
+              }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 搜索异常: '+e.message,err:true});return '✗ web: '+e.message;}
+            }
+            if(args.url){
+              st({text:'🌐 抓取网页: '+args.url,ok:false});
+              try{
+                const PAGE=16000, MAX_PAGES=5, HARD_CAP=40000;
+                let full='', offset=0, truncated=false;
+                for(let i=0;i<MAX_PAGES;i++){
+                  const r=await fetchTool('/web-fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:args.url,maxLen:PAGE,offset})},{signal:ac.signal});
+                  if(!r.ok){let se='';try{const sj=await r.json();se=sj.error||''}catch(_){se='HTTP '+r.status}st({text:'✗ 抓取失败'+(se?': '+se:''),err:true});return '✗ web: 请求失败'+(se?': '+se:'');}
+                  const rd=await r.json();
+                  if(rd.error){st({text:'✗ 抓取失败: '+rd.error,err:true});return '✗ web: '+rd.error;}
+                  full+=(i>0?'\n...(接上一段)...\n':'')+(rd.content||'');
+                  if(!rd.truncated){truncated=false;break;}
+                  truncated=true; offset+=PAGE;
+                }
+                if(full.length>HARD_CAP)full=full.substring(0,HARD_CAP)+'\n...(内容过长已截断，共 '+full.length+' 字，仅展示前 '+HARD_CAP+' 字)';
+                else if(truncated)full+='\n⚠️ 网页内容较长，仅展示前 '+(MAX_PAGES*PAGE)+' 字，更后面的内容可再次抓取获取';
+                st({text:'✓ 已获取 '+args.url+(truncated?'（已自动翻页）':'')+(full.length>HARD_CAP?'（截断）':''),ok:true});
+                return full||'(空内容)';
+              }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 抓取异常: '+e.message,err:true});return '✗ web: '+e.message;}
+            }
+            st({text:'✗ 请传 q（搜索）或 url（抓取）',err:true});return '✗ web: 请传 q（搜索）或 url（抓取）';
           }
 
-          if(name==='rename_symbol'){
-            st({text:'🔁 重命名: '+args.oldName+' → '+args.newName,ok:false});
+          if(name==='replace'){
+            const pattern=args.wholeWord
+              ? '\\b' + args.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'
+              : args.pattern;
+            st({text:args.wholeWord?'🔁 重命名: ':'🔁 批量替换: '+args.pattern+' → '+args.replacement,ok:false});
             try{
-              const r=await fetchTool('/rename-symbol',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldName:args.oldName,newName:args.newName,searchPath:args.searchPath,fileType:args.fileType})},{timeout:60000,signal:ac.signal});
-              if(!r.ok){st({text:'✗ 重命名失败',err:true});return '✗ rename_symbol: 请求失败';}
+              const body={pattern,replacement:args.replacement};
+              if(args.path)body.searchPath=args.path;
+              if(args.fileType)body.fileType=args.fileType;
+              const r=await fetchTool('/batch-replace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},{timeout:120000,signal:ac.signal});
+              if(!r.ok){let se='';try{const sj=await r.json();se=sj.error||''}catch(_){se='HTTP '+r.status}st({text:'✗ 替换失败'+(se?': '+se:''),err:true});return '✗ replace: '+(se||'请求失败');}
               const rd=await r.json();
-              if(rd.error){st({text:'✗ '+rd.error,err:true});return '✗ rename_symbol: '+rd.error;}
-              if(rd.changed>0){
-                didMutate=true;
-                const errFiles=rd.changes.filter(c=>c.lint&&!c.lint.ok);
-                if(errFiles.length>0)st({text:'⚠️ 重命名完成，但有 '+errFiles.length+' 个文件语法检查未通过',ok:true});
-                else st({text:'✓ 重命名完成: '+args.oldName+' → '+args.newName+'（'+rd.changed+'文件，'+rd.totalOccurrences+'处）',ok:true});
-              }else{
-                st({text:'⚠️ '+rd.message,ok:true});
-              }
-              return rd.message;
-            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 重命名异常',err:true});return '✗ rename_symbol: '+e.message;}
+              if(rd.changed===0){st({text:'⚠️ 未找到匹配 "'+args.pattern+'"',ok:true});return '✓ replace "'+args.pattern+'" (0个)';}
+              didMutate=true;
+              const errFiles=rd.files.filter(f=>f.lint&&!f.lint.ok);
+              const failFiles=rd.files.filter(f=>f.error);
+              const okFiles=rd.files.filter(f=>!f.error&&(!f.lint||f.lint.ok));
+              st({text:failFiles.length?'⚠️ 替换完成，'+failFiles.length+'个文件写入失败':'✓ 替换完成: '+rd.changed+'个文件',ok:true});
+              let detail='✓ replace "'+args.pattern+'" → "'+args.replacement+'"（'+rd.changed+'个文件'+(args.wholeWord?'，精确匹配':'')+'）';
+              if(okFiles.length)detail+='\n✅ 成功:\n'+okFiles.map(f=>'  📄 '+f.file+'（'+f.matchLines.length+'行）'+(f.lint?' '+(f.lint.ok?'✅':'') :'')).join('\n');
+              if(errFiles.length)detail+='\n⚠️ 语法检查未通过:\n'+errFiles.map(f=>'  '+f.file+': '+f.lint.output.substring(0,200)).join('\n');
+              if(failFiles.length)detail+='\n❌ 写入失败:\n'+failFiles.map(f=>'  '+f.file+': '+f.error).join('\n');
+              return detail;
+            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 替换异常: '+e.message,err:true});return '✗ replace: '+e.message;}
+          }
+          if(name==='mkdir'){
+            window.api?.sendToChatWindow({id:editTid,type:'tool-status',text:'📁 创建目录: '+args.path,ok:false});
+            try{
+              const r=await fetchTool('/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:args.path})},{signal:ac.signal});
+              const rd=await r.json();
+              if(!r.ok||rd.error){st({text:'✗ 创建目录失败'+(rd.error?': '+rd.error:''),err:true});return '✗ mkdir'+(rd.error?': '+rd.error:'');}
+              didMutate=true;
+              edits.push({path:args.path,kind:'mkdir',note:'创建目录',changes:[],ok:true});editSt();
+              return '✓ mkdir '+args.path;
+            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 创建目录异常: '+e.message,err:true});return '✗ mkdir: '+e.message;}
+          }
+          if(name==='rename_file'){
+            window.api?.sendToChatWindow({id:editTid,type:'tool-status',text:'🔁 移动/重命名: '+args.oldPath+' → '+args.newPath,ok:false});
+            try{
+              const r=await fetchTool('/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPath:args.oldPath,newPath:args.newPath})},{signal:ac.signal});
+              const rd=await r.json();
+              if(!r.ok||rd.error){st({text:'✗ 移动失败'+(rd.error?': '+rd.error:''),err:true});return '✗ rename_file'+(rd.error?': '+rd.error:'');}
+              didMutate=true;
+              edits.push({path:args.oldPath+' → '+args.newPath,kind:'rename',note:'移动/重命名',changes:[],ok:true});editSt();
+              return '✓ rename_file '+args.oldPath+' → '+args.newPath;
+            }catch(e){if(ac.signal&&ac.signal.aborted)throw e;st({text:'✗ 移动异常: '+e.message,err:true});return '✗ rename_file: '+e.message;}
           }
 
           st({text:icon+' 未知工具: '+name,err:true});return name+': 未知工具';
@@ -986,15 +1072,10 @@ async function buildAiContext(scenario) {
      '主人跟你聊天了，你可以自主决定做任何事');
   const timeHintMsg = { role: 'system', content: timeHint };
   msgs.push(timeHintMsg);
-  // 思考指引放在时间提示后面（在所有固定信息的最后），动态拼接项目目录、文件索引和系统信息
+  // 思考指引放在时间提示后面（在所有固定信息的最后），动态拼接项目目录和文件索引
   let projectText = '';
-  let osText = '';
   try {
-    const [pR, iR, osR] = await Promise.all([fetch('/workspace'), fetch('/workspace-index'), fetch('/platform')]);
-    if (osR.ok) {
-      const plat = await osR.text();
-      osText = plat === 'win32' ? 'Windows' : plat === 'darwin' ? 'macOS' : 'Linux';
-    }
+    const [pR, iR] = await Promise.all([fetch('/workspace'), fetch('/workspace-index')]);
     if (pR.ok) {
       try {
         const ws = await pR.json();
@@ -1010,7 +1091,7 @@ async function buildAiContext(scenario) {
       projectText += '\n' + lines.join('\n') + (idx.length > 1000 ? '\n  └── ...(仅显示前1000个)' : '');
     }
   } catch (e) {}
-  const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先思考要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先明确做什么然后思考出计划然后根据计划制定步骤，制定的步骤不能有冗余的操作，能在一个步骤完成的不要分多步。\n所有的任务都要在工作空间内进行，文件操作优先使用专用工具而非 shell 命令(当前系统是 ' + (osText || 'Windows') + ')\n• 修 bug 时如果连续尝试 3 次仍未解决，停止操作并将问题告诉主人，让主人提供报错信息来协助定位。' + projectText };
+  const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先思考要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先明确做什么然后思考出计划然后根据计划制定步骤，制定的步骤不能有冗余的操作，能在一个步骤完成的不要分多步。\n• 修 bug 时如果连续尝试 3 次仍未解决，停止操作并将问题告诉主人，让主人提供报错信息来协助定位。' + projectText };
   msgs.push(thinkGuideMsg);
   await ensureToolsCfg();
   const tools = makeTools();
@@ -1278,6 +1359,14 @@ window.api?.onAiCfgWindowClosed(async()=>{
 });
 window.api?.onPetCfgWindowClosed(async()=>{
   await loadAllConfigs();
+});
+// 开场白/主动问候开关即时生效：宠物配置窗口切换开关时，实时更新内存中的 petCfg（输入框内容仍只在点“保存配置”后生效）
+window.api?.onPetCfgLive((partial)=>{
+  if(!partial)return;
+  if('openingGreeting' in partial)petCfg.openingGreeting=partial.openingGreeting;
+  if('proactiveGreeting' in partial)petCfg.proactiveGreeting=partial.proactiveGreeting;
+  // 主动问候开关变化立即套用：重置调度（关闭后即便到点也只重新计时，不再主动问候）
+  if('proactiveGreeting' in partial)scheduleProactive();
 });
 // 技能变更时立即清除 MCP 工具缓存，下次 AI 调用自动拉取最新工具列表
 window.api?.onMcpSkillsChanged(()=>{invalidateMcpCache();});

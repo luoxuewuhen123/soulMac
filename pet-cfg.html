@@ -98,6 +98,28 @@ async function save() {
 }
 
 document.getElementById('saveBtn').addEventListener('click', save);
+
+// 开场白 / 主动问候 两个开关：点击后立即对运行中的宠物生效（不依赖“保存配置”）
+function liveToggle(){
+  const partial={
+    openingGreeting: document.getElementById('openingToggle').checked,
+    proactiveGreeting: document.getElementById('proactiveToggle').checked,
+  };
+  // 仅持久化这两个开关，避免覆盖输入框中尚未保存的内容（读取现有配置后只覆盖开关字段）
+  fetch('/load-pet-cfg').then(r=>r.ok?r.json():{}).then(cur=>{
+    cur=cur||{};
+    cur.openingGreeting=partial.openingGreeting;
+    cur.proactiveGreeting=partial.proactiveGreeting;
+    return fetch('/save-pet-cfg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cur)});
+  }).catch(()=>{});
+  // 通知运行中的宠物立即生效
+  window.api?.updatePetCfgLive(partial);
+  const msg=document.getElementById('saveMsg');
+  msg.className='ok'; msg.textContent='✅ 开关已立即生效';
+}
+document.getElementById('openingToggle').addEventListener('change', liveToggle);
+document.getElementById('proactiveToggle').addEventListener('change', liveToggle);
+
 load();
 </script>
 </body></html>

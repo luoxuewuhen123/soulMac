@@ -21,6 +21,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const { execFile, exec } = require('child_process');
+const os = require('os');
 const zlib = require('zlib');
 // TTS 使用子进程，避免 Electron 环境兼容性问题
 // edge-tts-universal 改为在 tts-worker.js 中通过系统 Node.js 调用
@@ -30,6 +31,17 @@ const mcp = require('./mcp');
 // TTS 合成结果内存缓存：相同文本直接复用，避免重复联网合成
 const ttsCache = new Map();
 const TTS_CACHE_MAX = 80;
+
+// 文本解码：自动检测 UTF-8/GBK，避免中文 Windows 文件乱码
+function decodeText(buf) {
+  // 先尝试 UTF-8（严格模式：无效字节直接抛异常）
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch (e) {
+    // UTF-8 失败 → 尝试 GB18030（GBK 超集，覆盖所有中文 Windows 编码）
+    try { return new TextDecoder('gb18030', { fatal: false }).decode(buf); }
+    catch (e2) { return buf.toString('latin1'); }
+  }
+}
 
 // 工作空间：所有文件操作和 bash 命令只能在此目录（含子目录）内运行，默认项目目录
 let WORKSPACE = __dirname;
@@ -67,29 +79,34 @@ DATA_NAMES.forEach(n => {
 // 路径安全检查工具（提升到模块作用域，避免每次请求重新创建）
 // 工作空间限制：所有文件操作只能在 WORKSPACE（含子目录）内进行，禁止访问外部路径
 // 相对路径从 WORKSPACE 开始解析，绝对路径也会被检查是否在 WORKSPACE 内
+// 符号链接会被解析到真实路径后再检查，防止符号链接逃逸
 function safePath(fp) {
   if (!fp) return null;
   let filePath = fp;
   if (!path.isAbsolute(filePath)) filePath = path.join(WORKSPACE, filePath);
+  // 先用 path.resolve 标准化，再用 realpath 解析符号链接
   const resolved = path.resolve(filePath);
+  let real;
+  try { real = fs.realpathSync(resolved); } catch (e) { real = resolved; }
   // 确保解析后的路径在工作空间内（含根目录本身）
-  const rel = path.relative(WORKSPACE, resolved);
+  const rel = path.relative(WORKSPACE, real);
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
-  return resolved;
+  return real;
 }
 
 // 命令安全检查：放开目录/路径/管道/重定向限制，仅在真正高危破坏性操作时拦截
 // （防宠物被注入后破坏系统；普通的项目外执行、绝对路径、cd ..、管道符均允许）
 // 命令安全已交由工作空间限制保障：所有 bash 命令只能在 WORKSPACE 内执行
-// ===== 语法检查（lint）：提取到模块顶层，供 write_file / apply_patch 写入后自动调用 =====
+// ===== 语法检查（lint）：提取到模块顶层，供 edit_file / replace 写入后自动调用 =====
 // 目的：写入即返回语法结果，省去 AI 单独调 lint_file 的一轮循环
 function jsonLint(fp, cb){
+  let content;
   try{
-    const content=fs.readFileSync(fp,'utf8');
+    content=fs.readFileSync(fp,'utf8');
     JSON.parse(content);
     cb(null,'语法正确');
   }catch(e){
-    const lines=content.split('\n');
+    const lines=(content||'').split('\n');
     const posMatch=e.message.match(/position\s+(\d+)/);
     if(posMatch){
       const pos=parseInt(posMatch[1],10);
@@ -102,77 +119,263 @@ function jsonLint(fp, cb){
     }
   }
 }
+// HTML 标签平衡检查（抽出为纯函数，供 .html 与 .vue 的 <template> 共用）
+function htmlTagErrors(content){
+  const errs=[];
+  const selfClosing=new Set(['br','hr','img','input','meta','link','area','base','col','embed','source','track','wbr']);
+  const stack=[];
+  let working = content
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, match => match.replace(/[^\n]/g, ''))
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, match => match.replace(/[^\n]/g, ''))
+    .replace(/`[^`]*`/g, match => match.replace(/[^\n]/g, ''))
+    .replace(/'[^']*'/g, match => match.replace(/[^\n]/g, ''))
+    .replace(/"[^"]*"/g, match => match.replace(/[^\n]/g, ''));
+  for (let i = 0; i < 5; i++) {
+    const before = working;
+    working = working.replace(/<(svg|template|text|xmp|noembed|noframes)\b[^>]*>[\s\S]*?<\/\1>/gi, match => match.replace(/[^\n]/g, ''));
+    if (working === before) break;
+  }
+  const tagRe=/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
+  let match;
+  while((match=tagRe.exec(working))!==null){
+    const full=match[0],tag=match[1].toLowerCase();
+    if(full.startsWith('</')){if(stack.length>0&&stack[stack.length-1]===tag)stack.pop();else if(!selfClosing.has(tag))errs.push(`多余的闭合标签 </${tag}>`);}
+    else if(!full.endsWith('/>')&&!selfClosing.has(tag))stack.push(tag);
+  }
+  while(stack.length>0)errs.push(`未闭合的标签 <${stack.pop()}>`);
+  return errs;
+}
 function htmlLint(fp, cb){
   try{
     const content=fs.readFileSync(fp,'utf8');
-    const errs=[];
-    const selfClosing=new Set(['br','hr','img','input','meta','link','area','base','col','embed','source','track','wbr']);
-    const stack=[];
-    let working = content
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, match => match.replace(/[^\n]/g, ''))
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, match => match.replace(/[^\n]/g, ''))
-      .replace(/`[^`]*`/g, match => match.replace(/[^\n]/g, ''))
-      .replace(/'[^']*'/g, match => match.replace(/[^\n]/g, ''))
-      .replace(/"[^"]*"/g, match => match.replace(/[^\n]/g, ''));
-    for (let i = 0; i < 5; i++) {
-      const before = working;
-      working = working.replace(/<(svg|template|text|xmp|noembed|noframes)\b[^>]*>[\s\S]*?<\/\1>/gi, match => match.replace(/[^\n]/g, ''));
-      if (working === before) break;
-    }
-    const tagRe=/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
-    let match;
-    while((match=tagRe.exec(working))!==null){
-      const full=match[0],tag=match[1].toLowerCase();
-      if(full.startsWith('</')){if(stack.length>0&&stack[stack.length-1]===tag)stack.pop();else if(!selfClosing.has(tag))errs.push(`多余的闭合标签 </${tag}>`);}
-      else if(!full.endsWith('/>')&&!selfClosing.has(tag))stack.push(tag);
-    }
-    while(stack.length>0)errs.push(`未闭合的标签 <${stack.pop()}>`);
+    const errs=htmlTagErrors(content);
     if(!/<!DOCTYPE[\s\S]*?>/i.test(content))errs.push('缺少 <!DOCTYPE> 声明');
-    if(errs.length>0)cb(new Error(errs.join('; ')),errs.join('\n'));
-    else cb(null,'语法正确');
-  }catch(e){cb(e,e.message);}
+    // 检查 <script> 内容的 JS 语法（vueLint 已支持，htmlLint 却一直跳过）
+    let pending=1;
+    const done=()=>{ if(--pending>0) return; if(errs.length>0) cb(new Error(errs.join('\n')), errs.join('\n')); else cb(null,'语法正确'); };
+    const scriptMatch=content.match(/<script\b([^>]*)>([\s\S]*?)<\/script>/i);
+    if(scriptMatch){
+      const attrs=scriptMatch[1]||'', body=scriptMatch[2]||'';
+      const isTS=/\blang\s*=\s*['"]ts['"]/i.test(attrs);
+      if(isTS){
+        const c=tsCheckContent(body);
+        if(c) errs.push('[script] ' + c);
+      } else if(body.trim()){
+        pending++;
+        runNodeCheck(body, /\bexport\s/.test(body) ? '.mjs' : '.js', (e, out)=>{ if(e) errs.push('[script] ' + out); done(); });
+      }
+    }
+    // 检查 <style> 内容的花括号平衡
+    const styleRe=/<style\b[^>]*>([\s\S]*?)<\/style>/gi; let sm; let si=0;
+    while((sm=styleRe.exec(content))!==null){ si++; const se=cssBraceErrors(sm[1]||''); if(se) errs.push('[style'+(si>1?('#'+si):'')+'] '+se); }
+    done();
+  }catch(e){ cb(e, e.message); }
+}
+// CSS 花括号平衡检查（抽出为纯函数，供 .css 与 .vue 的 <style> 共用）
+function cssBraceErrors(content){
+  const cleaned=content.replace(/\/\*[\s\S]*?\*\//g,'').replace(/['"][^'"]*['"]/g,'');
+  let brace=0;
+  for(const ch of cleaned){
+    if(ch==='{')brace++;
+    else if(ch==='}')brace--;
+  }
+  if(brace>0)return `有 ${brace} 个未闭合的花括号 {`;
+  if(brace<0)return `有 ${-brace} 个多余的花括号 }`;
+  return '';
 }
 function cssLint(fp, cb){
   try{
     const content=fs.readFileSync(fp,'utf8');
-    const cleaned=content.replace(/\/\*[\s\S]*?\*\//g,'').replace(/['"][^'"]*['"]/g,'');
-    let brace=0;
-    for(const ch of cleaned){
-      if(ch==='{')brace++;
-      else if(ch==='}')brace--;
-    }
-    if(brace>0)cb(new Error(`有 ${brace} 个未闭合的花括号 {`),`有 ${brace} 个未闭合的花括号 {`);
-    else if(brace<0)cb(new Error(`有 ${-brace} 个多余的花括号 }`),`有 ${-brace} 个多余的花括号 }`);
+    const e=cssBraceErrors(content);
+    if(e)cb(new Error(e),e);
     else cb(null,'语法正确');
   }catch(e){cb(e,e.message);}
+}
+// ===== TypeScript 语法检查（接入 tsc 的 transpileModule，仅做语法校验，不报错类型） =====
+let _tsMod, _tsTried=false;
+function getTS(){ if(_tsTried) return _tsMod; _tsTried=true; try{ _tsMod=require('typescript'); }catch(e){ _tsMod=null; } return _tsMod; }
+// 对 TS 源码做语法检查，返回 '' 表示通过，否则返回多行错误信息（已带行列号）
+function tsCheckContent(content){
+  const ts=getTS();
+  if(!ts){
+    // 退化方案：typescript 未安装时仅做括号/引号平衡粗检，无法捕获类型注解等语法细节
+    return genericBalanceCheck(content, 'TypeScript');
+  }
+  const r=ts.transpileModule(content, { reportDiagnostics:true, compilerOptions:{ target:ts.ScriptTarget.ES2020, module:ts.ModuleKind.ESNext } });
+  const errs=r.diagnostics.filter(d=>d.category===ts.DiagnosticCategory.Error);
+  if(errs.length===0) return '';
+  return errs.map(d=>{
+    let lc='';
+    if(d.file && d.start!=null){ const p=ts.getLineAndCharacterOfPosition(d.file, d.start); lc=`(${p.line+1}:${p.character+1}) `; }
+    return lc + ts.flattenDiagnosticMessageText(d.messageText,'\n');
+  }).join('\n');
+}
+function tsLint(fp, cb){
+  try{
+    const content=fs.readFileSync(fp,'utf8');
+    const msg=tsCheckContent(content);
+    if(msg) cb(new Error(msg), msg);
+    else cb(null,'语法正确');
+  }catch(e){ cb(e, e.message); }
+}
+// 通用括号/引号平衡粗检（不限语言类型，所有不支持的文件也会执行此兜底检查）
+function genericBalanceCheck(content, label){
+  let paren=0, brace=0, bracket=0; const stack=[];
+  const pairs={')':'(', '}':'{', ']':'['};
+  for(const ch of content){
+    if(ch==='(')paren++; else if(ch===')')paren--;
+    else if(ch==='{')brace++; else if(ch==='}')brace--;
+    else if(ch==='[')bracket++; else if(ch===']')bracket--;
+    else if(ch==='"'||ch==="'"||ch==='`'){ if(stack.length&&stack[stack.length-1]===ch)stack.pop(); else stack.push(ch); }
+  }
+  const errs=[];
+  if(paren!==0)errs.push(`圆括号不匹配(差${paren})`);
+  if(brace!==0)errs.push(`花括号不匹配(差${brace})`);
+  if(bracket!==0)errs.push(`方括号不匹配(差${bracket})`);
+  if(stack.length)errs.push('引号未闭合');
+  return errs.length? `[${label}粗检] ` + errs.join('; ') : '';
+}
+// 把一段 JS/ESM 内容写到临时文件用 node --check 校验（处理 export 等 ESM 语法）
+function runNodeCheck(content, ext, cb){
+  const tmp=path.join(os.tmpdir(), 'soul_lint_' + Date.now() + '_' + Math.random().toString(36).slice(2) + ext);
+  fs.writeFile(tmp, content, err=>{
+    if(err){ cb(err, err.message); return; }
+    execFile('node', ['--check', tmp], { timeout: 15000 }, (e, stdout, stderr)=>{
+      fs.unlink(tmp, ()=>{});
+      const out=(stderr||stdout||'').trim();
+      if(e && out) cb(e, out);
+      else if(e) cb(e, e.message);
+      else cb(null, '语法正确');
+    });
+  });
+}
+// ===== Vue 单文件组件语法检查（拆分 <script>/<template>/<style> 分别校验） =====
+function vueLint(fp, cb){
+  try{
+    const content=fs.readFileSync(fp,'utf8');
+    const errs=[];
+    let pending=1; // 末尾 done() 占 1；若 script 为 JS 还需一次异步 node 检查
+    const done=()=>{ if(--pending>0) return; if(errs.length>0) cb(new Error(errs.join('\n')), errs.join('\n')); else cb(null,'语法正确'); };
+    // 1) <script>（含 <script setup>）：lang="ts" 走 tsc，否则走 node --check（ESM）
+    const scriptMatch=content.match(/<script\b([^>]*)>([\s\S]*?)<\/script>/i);
+    if(scriptMatch){
+      const attrs=scriptMatch[1]||'', body=scriptMatch[2]||'';
+      const isTS=/\blang\s*=\s*['"]ts['"]/i.test(attrs);
+      if(isTS){
+        const c=tsCheckContent(body);
+        if(c) errs.push('[script] ' + c);
+      } else if(body.trim()){
+        pending++;
+        runNodeCheck(body, /\bexport\s/.test(body) ? '.mjs' : '.js', (e, out)=>{ if(e) errs.push('[script] ' + out); done(); });
+      }
+    }
+    // 2) <template>：标签平衡
+    const tplMatch=content.match(/<template\b[^>]*>([\s\S]*?)<\/template>/i);
+    if(tplMatch){
+      const te=htmlTagErrors(tplMatch[1]||'');
+      if(te.length) errs.push('[template] ' + te.join('; '));
+    }
+    // 3) <style>（可能多个）：花括号平衡
+    const styleRe=/<style\b[^>]*>([\s\S]*?)<\/style>/gi; let sm; let si=0;
+    while((sm=styleRe.exec(content))!==null){ si++; const se=cssBraceErrors(sm[1]||''); if(se) errs.push('[style'+(si>1?('#'+si):'')+'] '+se); }
+    done();
+  }catch(e){ cb(e, e.message); }
+}
+// XML 标签平衡检查（复用 htmlTagErrors，但跳过 DOCTYPE 检查）
+function xmlLint(fp, cb){
+  try{
+    const content=fs.readFileSync(fp,'utf8');
+    const errs=htmlTagErrors(content);
+    if(errs.length>0) cb(new Error(errs.join('\n')), errs.join('\n'));
+    else cb(null,'语法正确');
+  }catch(e){ cb(e, e.message); }
+}
+// YAML 语法检查（优先用 js-yaml，未安装则退化到通用平衡检查）
+function yamlLint(fp, cb){
+  try{
+    const content=fs.readFileSync(fp,'utf8');
+    let yaml;
+    try{ yaml=require('js-yaml'); }catch(_){ yaml=null; }
+    if(yaml){
+      try{ yaml.load(content); cb(null,'语法正确'); }catch(e){ cb(new Error(e.message), e.message); }
+    }else{
+      const r=genericBalanceCheck(content, 'YAML');
+      if(r) cb(new Error(r), r); else cb(null,'语法正确');
+    }
+  }catch(e){ cb(e, e.message); }
+}
+// Shell 语法检查（优先用 bash -n，退化到通用平衡检查）
+function shellLint(fp, cb){
+  if(process.platform==='win32'){
+    // Windows 一般没有 bash，直接退化到通用检查
+    try{
+      const content=fs.readFileSync(fp,'utf8');
+      const r=genericBalanceCheck(content, 'Shell');
+      if(r) cb(new Error(r), r); else cb(null,'语法正确');
+    }catch(e){ cb(e, e.message); }
+  }else{
+    execFile('bash', ['-n', fp], { timeout: 15000 }, (err, stdout, stderr) => {
+      if(err) cb(err, (stderr||stdout||'').trim() || '语法错误');
+      else cb(null,'语法正确');
+    });
+  }
 }
 const LINT_CHECKS = {
   '.js': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
   '.jsx': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
   '.mjs': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
   '.cjs': (fp, cb) => execFile('node', ['--check', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
-  '.py': (fp, cb) => execFile('python', ['-m', 'py_compile', fp], { timeout: 15000 }, (err, stdout, stderr) => cb(err, (stderr||stdout||'').trim())),
+  '.py': (fp, cb) => {
+    const pyCmds = process.platform === 'win32' ? ['python', 'python3', 'py'] : ['python3', 'python'];
+    (function tryPy(i){
+      if(i>=pyCmds.length){ cb(new Error('未找到 python 解释器'), '未找到 python 解释器'); return; }
+      execFile(pyCmds[i], ['-m', 'py_compile', fp], { timeout: 15000 }, (err, stdout, stderr) => {
+        if(err && err.code === 'ENOENT'){ tryPy(i+1); return; }
+        cb(err, (stderr||stdout||'').trim());
+      });
+    })(0);
+  },
   '.json': jsonLint,
   '.html': htmlLint,
   '.css': cssLint,
+  // TypeScript（接入 tsc 的 transpileModule 做语法校验，仅捕获语法错误，不报类型错误）
+  '.ts': tsLint,
+  '.tsx': tsLint,
+  '.mts': tsLint,
+  '.cts': tsLint,
+  // Vue 单文件组件（拆分 script/template/style 分段校验）
+  '.vue': vueLint,
+  // XML（复用 HTML 标签平衡检查器）
+  '.xml': xmlLint,
+  // YAML（优先 js-yaml 解析，未安装则退化到通用平衡检查）
+  '.yaml': yamlLint,
+  '.yml': yamlLint,
+  // Shell（优先 bash -n，退化到通用平衡检查）
+  '.sh': shellLint,
+  '.bash': shellLint,
 };
-// 统一 lint 入口：返回 cb(null, null) 表示该类型不支持；cb(null, {ok, output}) 为结果
+// 统一 lint 入口（供 edit_file / replace 写入后自动调用）：返回 cb(null, null) 表示跳过；cb(null, {ok, output}) 为结果
+// 未注册的文件类型：用通用括号/引号平衡检查兜底，不再直接返回"不支持"
 function lintFile(fp, cb){
   const ext = path.extname(fp).toLowerCase();
   const fn = LINT_CHECKS[ext];
-  if(!fn){ cb(null, null); return; }
+  if(!fn){
+    // 通用兜底：括号/引号平衡检查（所有文本文件都能查）
+    try{
+      const content=fs.readFileSync(fp,'utf8');
+      const r=genericBalanceCheck(content, ext.slice(1).toUpperCase());
+      if(r) cb(null, { ok:false, output:r.substring(0,1000) });
+      else cb(null, { ok:true, output:'语法正确' });
+    }catch(e){ cb(e, { ok:false, output:e.message }); }
+    return;
+  }
   fn(fp, (err, output) => {
     if(err && output) cb(null, { ok:false, output:output.substring(0,1000) });
     else if(err) cb(null, { ok:false, output:err.message });
     else cb(null, { ok:true, output:output||'语法正确' });
   });
 }
-// 当前正在执行的 bash 子进程引用集合，供"中断"按钮通过 /bash-abort 真正终止后台进程
-let currentBashChild = null;
-// 并行 bash 进程的完整集合（防止中断遗漏）
-const _bashChildren = new Set();
-
 function startServer() {
   return new Promise(r => {
     server = http.createServer((req, res) => {
@@ -190,21 +393,40 @@ function startServer() {
       if (req.method === 'GET' && req.url.startsWith('/read-file?path=')) {
         const q = new URL(req.url, 'http://x').searchParams;
         let fp = q.get('path') || '';
-        const maxLines = parseInt(q.get('lines') || '2000', 10);
-        const offset = parseInt(q.get('offset') || '0', 10);
+        let maxLines = parseInt(q.get('lines') || '2000', 10);
+        const offset = Math.max(0, parseInt(q.get('offset') || '0', 10) || 0);
         if (!fp) { res.writeHead(400); res.end('{"error":"empty path"}'); return; }
         const resolved = safePath(fp);
         if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: '操作被拒绝：只能在「' + WORKSPACE + '」内操作' })); return; }
-        fs.readFile(resolved, 'utf-8', (e, d) => {
-          if (e) { res.writeHead(404); res.end('{"error":"文件不存在或无法读取"}'); return; }
+        // 文件大小预检：超过 50MB 拒绝读取，避免 OOM
+        let st;
+        try { st = fs.statSync(resolved); } catch(e) { res.writeHead(404); res.end(JSON.stringify({ error: '文件不存在: ' + e.message })); return; }
+        if (st.isDirectory()) { res.writeHead(400); res.end(JSON.stringify({ error: '是一个文件夹，不是文件，请用 tree 查看目录内容' })); return; }
+        if (st.size > 50 * 1024 * 1024) { res.writeHead(413); res.end(JSON.stringify({ error: '文件过大（' + (st.size/1024/1024).toFixed(1) + 'MB），超过50MB限制' })); return; }
+        // lines=-1 表示读取全部行
+        if (maxLines < 0) maxLines = Infinity;
+        // 读取文件（不指定编码，自动处理 UTF-8/GBK 等编码，避免中文 Windows 乱码）
+        fs.readFile(resolved, (e, buf) => {
+          if (e) { res.writeHead(404); res.end(JSON.stringify({ error: '文件无法读取: ' + e.message })); return; }
+          const d = decodeText(buf);
           const lines = d.split('\n');
           const total = lines.length;
-          const show = lines.slice(offset, offset + maxLines);
           const endLine = Math.min(offset + maxLines, total);
-          const numbered = show.map((l, i) => `${String(i+1+offset).padStart(5)}:${l}`).join('\n');
+          const show = lines.slice(offset, endLine);
+          // 单行长度上限：压缩后的超大单行（如 bundle/lock 文件）截断，避免单条记录撑爆上下文
+          const MAX_LINE_DISP = 8000;
+          const numbered = show.map((l, i) => {
+            const disp = l.length > MAX_LINE_DISP ? l.slice(0, MAX_LINE_DISP) + ' …(本行过长已截断，共 ' + l.length + ' 字符)' : l;
+            return `${String(i+1+offset).padStart(5)}:${disp}`;
+          }).join('\n');
           let result = numbered;
+          // 整体回传上限：防止一次读取返回过大的内容（分页读取更稳妥）
+          const MAX_READ_CHARS = 256 * 1024;
+          if (result.length > MAX_READ_CHARS) {
+            result = result.slice(0, MAX_READ_CHARS) + `\n⚠️ 本次读取内容过长（超过 ${(MAX_READ_CHARS/1024)|0}KB）已截断，请用更小的 lines 或更大的 offset 分段读取`;
+          }
           // 提示放在最前面，AI 更容易注意到
-          if (offset + maxLines < total)
+          if (offset + maxLines < total && maxLines !== Infinity)
             result = `⚠️ 文件共${total}行，本次仅显示第${offset+1}-${endLine}行，还有${total-endLine}行未读！请立即用 offset=${endLine} 调 read_file 继续读取剩余部分\n\n` + result;
           else
             result = `✅ 已读取全部${total}行（第${offset+1}-${endLine}行）\n\n` + result;
@@ -213,7 +435,7 @@ function startServer() {
         });
         return;
       }
-      // 文档解析（PDF / DOCX）— 供 read_image / read_files 后端调用，提取文字供 AI 处理
+      // 文档解析（图片）— 供 read_files 后端调用，提取文字供 AI 处理
       if (req.method === 'POST' && req.url === '/parse-document') {
         readBody(req).then(async body => {
           try {
@@ -230,7 +452,7 @@ function startServer() {
                 const mime = { '.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.bmp':'image/bmp' }[ext] || 'image/png';
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ type: 'image', data: `data:${mime};base64,${b64}` }));
-              } catch(e) { res.writeHead(404); res.end(JSON.stringify({ error: '图片读取失败' })); }
+              } catch(e) { res.writeHead(404); res.end(JSON.stringify({ error: '图片读取失败: ' + e.message })); }
               return;
             }
             // PDF/DOCX 文档解析已移除，由 MCP 工具接管
@@ -252,80 +474,134 @@ function startServer() {
         const resolved = safePath(searchPath);
         if (!resolved) { res.writeHead(403); res.end('{"error":"path not allowed"}'); return; }
         // 自动判断：如果 q 是正则则用正则匹配，否则用 keyword 匹配
+        // ReDoS 防护：拒绝"嵌套量词"危险模式（如 (a+)+、(.*)+、(x*)* 等会导致灾难性回溯的正则）。
+        // 命中则退化为关键词搜索——因为正则匹配是同步阻塞事件循环的，定时器无法中断卡死，必须从源头拦截。
         let isRegex = false;
-        try { new RegExp(q); isRegex = true; } catch(e) { isRegex = false; }
+        const redosPattern = /\([^()]*[+*?][^()]*\)\s*[*+?{]/;
+        if (!redosPattern.test(q)) { try { new RegExp(q); isRegex = true; } catch(e) { isRegex = false; } }
         const matcher = isRegex
           ? new RegExp(q, caseSensitive ? '' : 'i')
           : { test: (line) => (caseSensitive ? line : line.toLowerCase()).includes(caseSensitive ? q : q.toLowerCase()) };
         const MAX_RESULTS = 500;
+        const MAX_FILE_SIZE = 10 * 1024 * 1024; // 超过10MB的文件跳过，避免OOM
+        const CONCURRENT_LIMIT = 20; // 并发读取文件数
+        // ReDoS 防护：为正则匹配设超时（3秒）
+        const timedTest = (re, text, timeout = 3000) => {
+          return new Promise(resolve => {
+            let done = false;
+            const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, timeout);
+            try {
+              // 在下一个微任务中执行正则，主线程可以响应超时
+              setImmediate(() => {
+                if (done) return;
+                try { done = true; clearTimeout(timer); resolve(re.test(text)); }
+                catch(e) { done = true; clearTimeout(timer); resolve(false); }
+              });
+            } catch(e) { done = true; clearTimeout(timer); resolve(false); }
+          });
+        };
         (async () => {
           const results = [];
-          const fileMatchCount = {}; // per-file match count
+          const fileMatchCount = {};
+          const fileQueue = []; // 待扫描文件队列
           async function walk(dir) {
             let entries;
             try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch(e) { return; }
             for (const e of entries) {
               if (e.name.startsWith('.') || e.name === 'node_modules') continue;
               const fp = path.join(dir, e.name);
-              if (e.isDirectory()) { await walk(fp); if (results.length >= MAX_RESULTS) return; }
+              if (e.isDirectory()) { if (results.length < MAX_RESULTS) await walk(fp); }
               else if ((!fileType || path.extname(e.name).toLowerCase() === '.' + fileType.replace(/^\./, '')) && SEARCH_EXTS.includes(path.extname(e.name).toLowerCase())) {
-                try {
-                  const content = await fs.promises.readFile(fp, 'utf-8');
-                  const lines = content.split('\n');
-                  const totalLines = lines.length;
-                  const relPath = path.relative(resolved, fp);
-                  let fileMatches = 0;
-                  for (let i = 0; i < lines.length; i++) {
-                    if (!matcher.test(lines[i])) continue;
-                    fileMatches++;
-                    if (results.length >= MAX_RESULTS) break;
-                    const context = ctxLines > 0
-                      ? [...lines.slice(Math.max(0,i-ctxLines),i), '→'+lines[i], ...lines.slice(i+1, Math.min(lines.length,i+1+ctxLines))].join('\n')
-                      : lines[i];
-                    results.push({ file: relPath, line: i+1, content: lines[i].trim(), context, lines: totalLines });
-                  }
-                  if (fileMatches > 0) fileMatchCount[relPath] = (fileMatchCount[relPath] || 0) + fileMatches;
-                } catch(e) {}
-                if (results.length >= MAX_RESULTS) return;
+                fileQueue.push(fp);
               }
             }
           }
           await walk(resolved);
+          // 并发读取文件，限制并发数
+          async function processFile(fp) {
+            if (results.length >= MAX_RESULTS) return;
+            try {
+              const st = fs.statSync(fp);
+              if (st.size > MAX_FILE_SIZE) { fileMatchCount['⚠️ 跳过超大文件'] = (fileMatchCount['⚠️ 跳过超大文件'] || 0) + 1; return; }
+              if (st.size === 0) return;
+              const buf = await fs.promises.readFile(fp);
+              const content = decodeText(buf);
+              const lines = content.split('\n');
+              const totalLines = lines.length;
+              const relPath = path.relative(resolved, fp);
+              const MAX_LINE_TEST = 65536; // 单行长上限：避免对超大行（如压缩后的单行文件）跑正则导致卡死
+              const capLine = (s) => s.length > 2000 ? s.slice(0, 2000) + '…(本行过长已截断)' : s;
+              let fileMatches = 0;
+              for (let i = 0; i < lines.length && results.length < MAX_RESULTS; i++) {
+                const lineForTest = lines[i].length > MAX_LINE_TEST ? lines[i].slice(0, MAX_LINE_TEST) : lines[i];
+                let matched;
+                if (isRegex) {
+                  matched = await timedTest(matcher, lineForTest); // ReDoS 防护（危险模式已退化为关键词）
+                } else {
+                  matched = matcher.test(lineForTest);
+                }
+                if (!matched) continue;
+                fileMatches++;
+                const context = ctxLines > 0
+                  ? [...lines.slice(Math.max(0,i-ctxLines),i).map(capLine), '→'+capLine(lines[i]), ...lines.slice(i+1, Math.min(lines.length,i+1+ctxLines)).map(capLine)].join('\n')
+                  : capLine(lines[i]);
+                results.push({ file: relPath, line: i+1, content: capLine(lines[i].trim()), context, lines: totalLines });
+              }
+              if (fileMatches > 0) fileMatchCount[relPath] = fileMatches;
+            } catch(e) {}
+          }
+          // 用简单并发池控制
+          let idx = 0;
+          async function worker() {
+            while (idx < fileQueue.length && results.length < MAX_RESULTS) {
+              const fp = fileQueue[idx++];
+              await processFile(fp);
+            }
+          }
+          const workers = Array.from({ length: Math.min(CONCURRENT_LIMIT, fileQueue.length || 1) }, () => worker());
+          await Promise.all(workers);
           const fileStats = Object.entries(fileMatchCount)
             .map(([file, matches]) => ({ file, matches }))
             .sort((a, b) => b.matches - a.matches);
+          const skippedLarge = fileStats.find(f => f.file === '⚠️ 跳过超大文件');
+          const extraMsg = skippedLarge ? `（${skippedLarge.matches}个文件因超过10MB跳过）` : '';
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ results: results.slice(0, MAX_RESULTS), total: results.length, truncated: results.length >= MAX_RESULTS, fileStats }));
+          res.end(JSON.stringify({ results: results.slice(0, MAX_RESULTS), total: results.length, truncated: results.length >= MAX_RESULTS, fileStats: fileStats.filter(f => f.file !== '⚠️ 跳过超大文件'), skippedLarge: skippedLarge ? skippedLarge.matches : 0 }));
         })();
         return;
       }
       // 按文件名搜索文件
+      // 按文件名搜索文件（异步遍历，避免阻塞事件循环）
       if (req.method === 'GET' && req.url.startsWith('/search-file?')) {
         const u = new URL(req.url, 'http://x');
         const pattern = u.searchParams.get('pattern') || '';
         const recursive = u.searchParams.get('recursive') !== 'false';
         const searchPath = u.searchParams.get('path') || '.';
-        if (!pattern) { res.writeHead(400); res.end('[]'); return; }
+        if (!pattern) { res.writeHead(400); res.end('{"error":"empty pattern"}'); return; }
         const resolved = safePath(searchPath);
-        if (!resolved) { res.writeHead(403); res.end('[]'); return; }
+        if (!resolved) { res.writeHead(403); res.end('{"error":"path not allowed"}'); return; }
         const re = new RegExp('^' + pattern.replace(/\//g,'\\/').replace(/\./g,'\\.').replace(/\*/g,'.*').replace(/\?/g,'.').replace(/\{([^}]+)\}/g, '($1)').replace(/,/g,'|') + '$', 'i');
         const list = [];
-        function walk(dir) {
-          let entries;
-          try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch(e) { return; }
-          for (const e of entries) {
-            if (e.name.startsWith('.') || e.name === 'node_modules') continue;
-            const fp = path.join(dir, e.name);
-            if (e.isDirectory()) { if (recursive) walk(fp); }
-            else if (re.test(e.name)) list.push(path.relative(resolved, fp));
+        const MAX_FILE_RESULTS = 5000;
+        (async () => {
+          async function walk(dir) {
+            let entries;
+            try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch(e) { return; }
+            for (const e of entries) {
+              if (e.name.startsWith('.') || e.name === 'node_modules' || list.length >= MAX_FILE_RESULTS) continue;
+              const fp = path.join(dir, e.name);
+              if (e.isDirectory()) { if (recursive) await walk(fp); }
+              else if (re.test(e.name)) list.push(path.relative(resolved, fp));
+            }
           }
-        }
-        walk(resolved);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(list));
+          await walk(resolved);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          const truncated = list.length >= MAX_FILE_RESULTS;
+          res.end(JSON.stringify({ files: truncated ? list.slice(0, MAX_FILE_RESULTS) : list, total: list.length, truncated }));
+        })();
         return;
       }
-      // 网页搜索（web_search 工具）- 通过 DuckDuckGo HTML 搜索获取结果
+      // 互联网搜索（web 工具）- 多引擎备选，提高可用性
       if (req.method === 'GET' && req.url.startsWith('/web-search?q=')) {
         const u = new URL(req.url, 'http://x');
         const q = u.searchParams.get('q') || '';
@@ -333,32 +609,54 @@ function startServer() {
         if (!q) { res.writeHead(400); res.end('{"error":"empty query"}'); return; }
         const osStr = process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : process.platform === 'linux' ? 'X11; Linux x86_64' : 'Windows NT 10.0; Win64; x64';
         const UA = `Mozilla/5.0 (${osStr}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36`;
-        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
-        const mod = searchUrl.startsWith('https') ? https : http;
-        mod.get(searchUrl, { timeout: 15000, headers: { 'User-Agent': UA } }, (resp) => {
-          let data = '';
-          resp.on('data', c => data += c);
-          resp.on('end', () => {
-            try {
-              const results = [];
-              // 提取搜索结果：<a class="result__a" href="...">标题</a>
-              const linkRe = /<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
-              const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-              let m, snippets = [];
-              while ((m = snippetRe.exec(data)) !== null) snippets.push(m[1].replace(/<[^>]+>/g, '').trim());
-              let idx = 0;
-              while ((m = linkRe.exec(data)) !== null && results.length < count) {
-                const title = m[2].replace(/<[^>]+>/g, '').trim();
-                if (!title) continue;
-                results.push({ title, url: m[1], snippet: snippets[idx] || '' });
-                idx++;
+        // 搜索引擎：Bing（国内可访问）
+        const engines = [
+          { name: 'Bing', url: `https://www.bing.com/search?q=${encodeURIComponent(q)}`, parse: parseBing },
+        ];
+        let idx = 0;
+        function tryNext(errMsg) {
+          if (idx >= engines.length) {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: '所有搜索引擎均失败: ' + (errMsg || '未知错误') }));
+            return;
+          }
+          const eng = engines[idx++];
+          const mod = eng.url.startsWith('https') ? https : http;
+          mod.get(eng.url, { timeout: 10000, headers: { 'User-Agent': UA } }, (resp) => {
+            let data = '';
+            resp.on('data', c => data += c);
+            resp.on('end', () => {
+              try {
+                const results = eng.parse(data, count);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ results, from: eng.name }));
+              } catch(e) {
+                tryNext(eng.name + ' 解析失败: ' + e.message);
               }
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ results }));
-            } catch(e) { res.writeHead(500); res.end(JSON.stringify({ error: '解析搜索结果失败: ' + e.message })); }
-          });
-        }).on('error', e => { res.writeHead(500); res.end(JSON.stringify({ error: '搜索请求失败: ' + e.message })); });
+            });
+            resp.on('error', () => tryNext(eng.name + ' 响应错误'));
+          }).on('error', e => tryNext(eng.name + ': ' + e.message));
+        }
+        tryNext();
         return;
+      }
+      // 搜索解析器：Bing
+      function parseBing(html, count) {
+        const results = [];
+        // Bing 搜索结果：<li class="b_algo"> 下 <h2><a href="...">title</a></h2> + <p>snippet</p>
+        const algoRe = /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/g;
+        let m;
+        while ((m = algoRe.exec(html)) !== null && results.length < count) {
+          const block = m[1];
+          const aMatch = block.match(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/);
+          if (!aMatch) continue;
+          const url = aMatch[1];
+          const title = aMatch[2].replace(/<[^>]+>/g, '').trim();
+          if (!title || url === 'javascript:void(0)') continue;
+          const snippet = block.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().replace(title, '').trim().substring(0, 300);
+          results.push({ title, url, snippet });
+        }
+        return results;
       }
       // 列出目录内容
       if (req.method === 'GET' && req.url.startsWith('/list-dir?path=')) {
@@ -366,59 +664,78 @@ function startServer() {
         if (!fp) fp='.';
         const resolved = safePath(fp);
         if (!resolved) { res.writeHead(403); res.end('[]'); return; }
-        try {
-          const entries = fs.readdirSync(resolved, { withFileTypes: true });
-          const list = entries.filter(e => !e.name.startsWith('.') && e.name !== 'node_modules').map(e => {
-            const isDir = e.isDirectory();
-            let size;
-            if (!isDir) { try { size = fs.statSync(path.join(resolved, e.name)).size; } catch (_) {} }
-            return { name: e.name, isDir, size };
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(list));
-        } catch(e) {
-          res.writeHead(500); res.end('[]');
-        }
+        (async () => {
+          try {
+            const entries = await fs.promises.readdir(resolved, { withFileTypes: true });
+            const list = [];
+            for (const e of entries) {
+              if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+              const isDir = e.isDirectory();
+              let size;
+              if (!isDir) { try { size = (await fs.promises.stat(path.join(resolved, e.name))).size; } catch (_) {} }
+              list.push({ name: e.name, isDir, size });
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(list));
+          } catch(e) {
+            res.writeHead(500); res.end(JSON.stringify({ error: '读取目录失败: ' + e.message }));
+          }
+        })();
         return;
       }
-      // 递归目录树（一次看清项目骨架，避免逐层 list_dir 的多轮循环）
+      // 项目文件索引（供 buildAiContext 注入上下文，让 AI 看清项目全貌）
+      // 递归目录树（一次看清项目骨架）
       if (req.method === 'GET' && req.url.startsWith('/tree?path=')) {
         const u = new URL(req.url, 'http://localhost');
         let fp = decodeURIComponent(u.searchParams.get('path') || '') || '.';
         const maxDepth = Math.min(parseInt(u.searchParams.get('maxDepth') || '3', 10) || 3, 6);
         const ignore = new Set((u.searchParams.get('ignore') || '').split(',').map(s => s.trim()).filter(Boolean));
-        const DEFAULT_IGNORE = new Set(['node_modules', '.git', '.codebuddy', '.idea', '.vscode', 'dist', 'build']);
+        const DEFAULT_IGNORE = new Set(['node_modules', '.git', '.codebuddy', '.idea', '.vscode', '.next', '.nuxt', '__pycache__', 'dist', 'build', 'target', 'vendor', 'bower_components', '.venv', 'venv', 'env', '.env']);
         const resolved = safePath(fp);
         if (!resolved) { res.writeHead(403); res.end('# 禁止访问的路径'); return; }
-        const lines = [];
-        let count = 0; const HARD_CAP = 600;
-        function walk(dir, depth, prefix) {
-          if (depth > maxDepth || count > HARD_CAP) return;
+        const MAX_ITEMS = 600; let totalCount = 0;
+        const result = []; // {line, depth} 数组
+        async function walk(dir, depth) {
+          if (depth > maxDepth || totalCount >= MAX_ITEMS) return;
           let entries;
-          try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+          try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (_) { return; }
           entries = entries.filter(e => {
             if (e.name.startsWith('.')) return false;
             if (DEFAULT_IGNORE.has(e.name) || ignore.has(e.name)) return false;
             return true;
           });
           entries.sort((a, b) => (a.isDirectory() === b.isDirectory()) ? a.name.localeCompare(b.name) : (a.isDirectory() ? -1 : 1));
-          entries.forEach((e, i) => {
-            if (count > HARD_CAP) return;
-            const isLast = i === entries.length - 1;
-            lines.push(prefix + (isLast ? '└── ' : '├── ') + e.name + (e.isDirectory() ? '/' : ''));
-            count++;
-            if (e.isDirectory()) walk(path.join(dir, e.name), depth + 1, prefix + (isLast ? '    ' : '│   '));
-          });
+          let displayed = 0, skipped = 0;
+          for (const e of entries) {
+            if (totalCount >= MAX_ITEMS) { skipped++; continue; }
+            totalCount++; displayed++;
+            const line = '  '.repeat(depth - 1) + '├── ' + e.name + (e.isDirectory() ? '/' : '');
+            result.push({ line, depth });
+            if (e.isDirectory()) await walk(path.join(dir, e.name), depth + 1);
+          }
+          if (skipped > 0) {
+            result.push({ line: '  '.repeat(depth - 1) + `└── ... (还有 ${skipped + countRemaining(entries, displayed)} 项未显示)`, depth });
+          }
         }
-        try {
-          lines.push(path.basename(resolved) + '/');
-          walk(resolved, 1, '');
-          if (count > HARD_CAP) lines.push('... (已达到显示上限 ' + HARD_CAP + ' 项，更深层请用更小的 maxDepth 或 list_dir 查看具体目录)');
-          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-          res.end(lines.join('\n'));
-        } catch (e) {
-          res.writeHead(500); res.end('# 读取失败: ' + e.message);
+        // 辅助：统计当前目录还有多少子项在跳过之后
+        function countRemaining(entries, displayed) {
+          let remaining = 0;
+          for (let i = displayed; i < entries.length; i++) {
+            remaining++;
+          }
+          return remaining;
         }
+        (async () => {
+          try {
+            result.push({ line: path.basename(resolved) + '/', depth: 0 });
+            await walk(resolved, 1);
+            if (totalCount >= MAX_ITEMS) result.push({ line: `... (已达到显示上限 ${MAX_ITEMS} 项，更深层请用更小的范围查看)`, depth: 0 });
+            res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end(result.map(r => r.line).join('\n'));
+          } catch (e) {
+            res.writeHead(500); res.end('# 读取失败: ' + e.message);
+          }
+        })();
         return;
       }
       // TTS（通过系统 Node.js 子进程调用 Edge TTS，避免 Electron 兼容问题）
@@ -483,65 +800,13 @@ function startServer() {
         });
         return;
       }
-      // 执行终端命令（bash）
-      if (req.method === 'POST' && req.url === '/bash') {
-        readBody(req).then(body => {
-          try {
-            const { command } = JSON.parse(body);
-            if (!command) { res.writeHead(400); res.end('{"error":"empty command"}'); return; }
-            // 命令安全已交由工作空间限制保障（WORKSPACE cwd + safePath 路径检查）
-            const isWin = process.platform === 'win32';
-            const cb = (err, stdout, stderr) => {
-              currentBashChild = null;
-              const output = (stdout||'') + (stderr||'');
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ code: err ? (err.code||1) : 0, output }));
-            };
-            const child = isWin
-              ? execFile('powershell', ['-NoProfile', '-Command',
-                // 自动将 CMD 的 && 转为 PowerShell 的 ;（分号）
-                command.replace(/&&/g, ';')
-              ], { cwd: WORKSPACE, timeout: 180000, maxBuffer: 10*1024*1024 }, cb)
-              : execFile('/bin/sh', ['-c', command], { cwd: WORKSPACE, timeout: 180000, maxBuffer: 10*1024*1024 }, cb);
-            // 确保子进程退出时清理引用，包括超时/崩溃等非正常退出场景
-            _bashChildren.add(child);
-            const cleanupChild = () => { _bashChildren.delete(child); if (currentBashChild === child) currentBashChild = null; };
-            child.on('exit', cleanupChild);
-            child.on('error', cleanupChild);
-            currentBashChild = child;
-          } catch(e) { res.writeHead(400); res.end('{"error":"invalid json"}'); }
-        });
-        return;
-      }
-      // 中断当前正在执行的 bash 命令（供前端"中断"按钮调用，真正终止后台子进程）
+      // 中断当前正在执行的命令（供前端"中断"按钮调用）
       if (req.method === 'POST' && req.url === '/bash-abort') {
-        // Windows 下用 taskkill /T 终止进程树，Unix 用 SIGTERM
-        const killProc = (child) => {
-          try {
-            if (process.platform === 'win32') {
-              // taskkill /F /T 强制终止进程及其所有子进程
-              execFile('taskkill', ['/F', '/T', '/PID', String(child.pid)], { timeout: 3000 }, () => {});
-            } else {
-              child.kill('SIGTERM');
-              // 再发 SIGKILL 确保子进程树也被终止（SIGTERM 后等 500ms 用负 PID 杀进程组）
-              setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch(e) {} }, 500);
-            }
-          } catch (e) { /* 进程可能已退出 */ }
-        };
-        if (currentBashChild) {
-          killProc(currentBashChild);
-          currentBashChild = null;
-        }
-        // 杀死所有正在运行的 bash 子进程（含并行）
-        for (const child of _bashChildren) {
-          killProc(child);
-        }
-        _bashChildren.clear();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
       }
-      // 应用 SEARCH/REPLACE 补丁（apply_patch）
+      // 应用 SEARCH/REPLACE 补丁（apply-patch 路由，供 edit_file 调用）
       if (req.method === 'POST' && req.url === '/apply-patch') {
         readBody(req).then(body => {
           try {
@@ -549,8 +814,10 @@ function startServer() {
             if (!fp || !patches || !patches.length) { res.writeHead(400); res.end(JSON.stringify({error:'missing params'})); return; }
             const resolved = safePath(fp);
             if (!resolved) { res.writeHead(403); res.end(JSON.stringify({error:'操作被拒绝：只能在「' + WORKSPACE + '」内操作'})); return; }
-            fs.readFile(resolved, 'utf-8', (e, content) => {
-              if (e) { res.writeHead(404); res.end(JSON.stringify({error:'文件不存在'})); return; }
+            // 文件大小预检：超过20MB拒绝patch（split/indexOf在大文件上性能极差）
+            try { const st = fs.statSync(resolved); if (st.size > 20 * 1024 * 1024) { res.writeHead(413); res.end(JSON.stringify({error:'文件过大（' + (st.size/1024/1024).toFixed(1) + 'MB），超过20MB，请手动编辑或用bash处理'})); return; } } catch(e) { res.writeHead(404); res.end(JSON.stringify({error:'文件不存在: ' + e.message})); return; }
+            fs.readFile(resolved, (e, buf) => { const content = decodeText(buf);
+              if (e) { res.writeHead(404); res.end(JSON.stringify({error:'文件无法读取: ' + e.message})); return; }
               // 先计算所有 patch 的位置（在原始内容中），再依次替换
               const originalLines = content.split('\n');
               let modified = content;
@@ -571,15 +838,15 @@ function startServer() {
                 const lineNum = modified.substring(0, idx).split('\n').length;
                 const oldSnippet = p.old.length > 40 ? p.old.substring(0, 40)+'...' : p.old;
                 const newSnippet = (p.new||'').length > 40 ? (p.new||'').substring(0, 40)+'...' : (p.new||'');
-                // newFull 携带完整替换后内容（不截断），供前端回传给 AI 做自校验
-                changes.push({line:lineNum, old:oldSnippet, new:newSnippet, newFull: p.new||''});
+                // newFull 携带替换后内容（截断到500字符，避免回传过大）
+                changes.push({line:lineNum, old:oldSnippet, new:newSnippet, newFull: (p.new||'').length > 500 ? (p.new||'').substring(0,500)+'...(截断)' : (p.new||'')});
                 modified = modified.replace(p.old, p.new || '');
               }
               if (changes.length === 0 && skipped.length === 0) { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({count:0})); return; }
               fs.writeFile(resolved, modified, 'utf-8', (we) => {
-                if (we) { res.writeHead(500); res.end(JSON.stringify({error:'写入失败'})); return; }
+                if (we) { res.writeHead(500); res.end(JSON.stringify({error:'写入失败: ' + we.message})); return; }
                 // 仅代码文件执行语法检查
-                const codeExts=['.js','.jsx','.mjs','.cjs','.py','.html','.css'];
+                const codeExts=['.js','.jsx','.mjs','.cjs','.ts','.tsx','.mts','.cts','.vue','.py','.html','.css','.xml','.yaml','.yml','.sh','.bash'];
                 const ext=path.extname(resolved).toLowerCase();
                 if(codeExts.includes(ext)){
                   lintFile(resolved, (e, lint) => {
@@ -609,9 +876,9 @@ function startServer() {
             const ok = (p) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(p)); };
             try { fs.mkdirSync(path.dirname(resolved), { recursive: true }); } catch (e) {}
             fs.writeFile(resolved, content, 'utf-8', (we) => {
-              if (we) { res.writeHead(500); res.end('{"error":"创建失败"}'); return; }
+              if (we) { res.writeHead(500); res.end('{"error":"创建失败: ' + we.message.replace(/"/g,"'") + '"}'); return; }
               // 仅代码文件执行语法检查，非代码文件（json/txt/md等）跳过
-              const codeExts=['.js','.jsx','.mjs','.cjs','.py','.html','.css'];
+              const codeExts=['.js','.jsx','.mjs','.cjs','.ts','.tsx','.mts','.cts','.vue','.py','.html','.css','.xml','.yaml','.yml','.sh','.bash'];
               if(codeExts.includes(ext)){
                 lintFile(resolved, (e, lint) => ok({ success: true, lint }));
               }else{
@@ -632,7 +899,8 @@ function startServer() {
             const resolved = safePath(fp);
             if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: '操作被拒绝：只能在「' + WORKSPACE + '」内操作' })); return; }
             fs.unlink(resolved, (we) => {
-              if (we) { res.writeHead(500); res.end(JSON.stringify({ error: '删除失败: ' + we.message })); return; }
+              // ENOENT（文件已不存在）视为成功，避免并发删除同一文件时报错
+              if (we && we.code !== 'ENOENT') { res.writeHead(500); res.end(JSON.stringify({ error: '删除失败: ' + we.message })); return; }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: true }));
             });
@@ -663,7 +931,9 @@ function startServer() {
                   const SEARCH_EXTS = ['.js','.jsx','.mjs','.cjs','.ts','.tsx','.vue','.html','.css','.scss','.less','.json','.xml','.yaml','.yml','.md','.py','.java','.go','.rs','.rb','.php','.c','.cpp','.h','.hpp','.swift','.kt','.dart','.lua','.pl','.sh','.bat','.ps1'];
                   if (!SEARCH_EXTS.includes(path.extname(e.name).toLowerCase())) continue;
                   try {
-                    const content = await fs.promises.readFile(fp, 'utf-8');
+                    const st = fs.statSync(fp);
+                    if (st.size > 10 * 1024 * 1024) continue; // 跳过 >10MB 的大文件
+                    const buf = await fs.promises.readFile(fp); const content = decodeText(buf);
                     if (!re.test(content)) continue;
                     re.lastIndex = 0;
                     const lines = content.split('\n');
@@ -732,6 +1002,59 @@ function startServer() {
         });
         return;
       }
+      // 跨文件批量替换：搜索所有匹配文件 → 替换全部匹配 → 自动语法检查
+      if (req.method === 'POST' && req.url === '/batch-replace') {
+        readBody(req).then(body => {
+          try {
+            const { pattern, replacement, searchPath, fileType } = JSON.parse(body);
+            if (!pattern || replacement === undefined) { res.writeHead(400); res.end(JSON.stringify({ error: '缺少参数 pattern/replacement' })); return; }
+            const resolved = safePath(searchPath || '.');
+            if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: '路径不允许' })); return; }
+            const re = new RegExp(pattern, 'g');
+            const BATCH_EXTS = ['.js','.jsx','.mjs','.cjs','.ts','.tsx','.vue','.html','.css','.scss','.less','.json','.xml','.yaml','.yml','.md','.py','.java','.go','.rs','.rb','.php','.c','.cpp','.h','.hpp','.swift','.kt','.dart','.lua','.pl','.sh','.bat','.ps1','.txt'];
+            const results = [];
+            (async () => {
+              async function walk(dir) {
+                let entries;
+                try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch(e) { return; }
+                for (const e of entries) {
+                  if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+                  const fp = path.join(dir, e.name);
+                  if (e.isDirectory()) { await walk(fp); continue; }
+                  if (fileType && path.extname(e.name).toLowerCase() !== '.' + fileType.replace(/^\./, '')) continue;
+                  if (!BATCH_EXTS.includes(path.extname(e.name).toLowerCase())) continue;
+                  try {
+                    const st = fs.statSync(fp);
+                    if (st.size > 10 * 1024 * 1024) continue;
+                    const buf = await fs.promises.readFile(fp); const content = decodeText(buf);
+                    if (!re.test(content)) continue; re.lastIndex = 0;
+                    const newContent = content.replace(re, replacement);
+                    if (newContent === content) continue; // 无实际变化
+                    const relPath = path.relative(resolved, fp);
+                    const lines = content.split('\n');
+                    const matchLines = [];
+                    for (let i = 0; i < lines.length; i++) { re.lastIndex = 0; if (re.test(lines[i])) matchLines.push(i + 1); }
+                    await fs.promises.writeFile(fp, newContent, 'utf-8');
+                    const lint = await new Promise(resolve => lintFile(fp, (e, r) => resolve(r)));
+                    results.push({ file: relPath, matchLines, lint: lint || null });
+                  } catch(e) {
+                    results.push({ file: path.relative(resolved, fp), error: e.message });
+                  }
+                }
+              }
+              await walk(resolved);
+              if (results.length === 0) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ changed: 0, files: [], message: '未找到匹配 "' + pattern + '" 的引用' }));
+                return;
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ changed: results.length, files: results, message: results.length + ' 个文件已完成替换' }));
+            })();
+          } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid json' })); }
+        });
+        return;
+      }
       // 创建目录
       if (req.method === 'POST' && req.url === '/mkdir') {
         readBody(req).then(body => {
@@ -741,7 +1064,7 @@ function startServer() {
             const resolved = safePath(fp);
             if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: '操作被拒绝：只能在「' + WORKSPACE + '」内操作' })); return; }
             fs.mkdir(resolved, { recursive: true }, (we) => {
-              if (we) { res.writeHead(500); res.end('{"error":"创建失败"}'); return; }
+              if (we) { res.writeHead(500); res.end('{"error":"创建目录失败: ' + we.message.replace(/"/g,"'") + '"}'); return; }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: true }));
             });
@@ -753,7 +1076,8 @@ function startServer() {
       if (req.method === 'POST' && req.url === '/rename') {
         readBody(req).then(body => {
           try {
-            const { path: fp, newPath } = JSON.parse(body);
+            let { path: fp, newPath, oldPath } = JSON.parse(body);
+            if (!fp && oldPath) fp = oldPath;
             if (!fp || !newPath) { res.writeHead(400); res.end('{"error":"missing params"}'); return; }
             const resolved = safePath(fp);
             const resolvedNew = safePath(newPath);
@@ -767,7 +1091,7 @@ function startServer() {
         });
         return;
       }
-      // 语法检查路由（lint 逻辑已移至模块顶层 lintFile；write_file/apply_patch 写入后自动调用，AI 无需单独 lint）
+      // 语法检查路由（lint 逻辑已移至模块顶层 lintFile；edit_file/replace 写入后自动调用，AI 无需单独 lint）
       if (req.method === 'POST' && req.url === '/lint-file') {
         readBody(req).then(body => {
           try {
@@ -783,7 +1107,7 @@ function startServer() {
         });
         return;
       }
-      // 网页抓取（web_fetch 工具）：支持重定向跟随、gzip/deflate 解压、charset 解码、超时中断、可选截断翻页
+      // 网页抓取（web 工具）：支持重定向跟随、gzip/deflate 解压、charset 解码、超时中断、可选截断翻页
       if (req.method === 'POST' && req.url === '/web-fetch') {
         readBody(req).then(body => {
           try {
@@ -804,12 +1128,14 @@ function startServer() {
                 const chunks = [];
                 let size = 0;
                 resp.on('data', c => { chunks.push(c); size += c.length; if (size > MAX_BYTES) reqGet.destroy(); });
-                resp.on('end', () => {
+                resp.on('end', async () => {
                   try {
                     let buf = Buffer.concat(chunks);
                     const enc = (resp.headers['content-encoding'] || '').toLowerCase();
-                    if (enc === 'gzip') buf = zlib.gunzipSync(buf);
-                    else if (enc === 'deflate') buf = zlib.inflateSync(buf);
+                    try {
+                      if (enc === 'gzip') buf = await new Promise((res, rej) => zlib.gunzip(buf, (e, d) => e ? rej(e) : res(d)));
+                      else if (enc === 'deflate') buf = await new Promise((res, rej) => zlib.inflate(buf, (e, d) => e ? rej(e) : res(d)));
+                    } catch(e) { /* 解压失败，使用原始 buf */ }
                     const ct = resp.headers['content-type'] || '';
                     const cm = ct.match(/charset=([\w-]+)/i);
                     const charset = (cm && cm[1] ? cm[1].toLowerCase() : 'utf-8');
@@ -835,6 +1161,27 @@ function startServer() {
             };
             fetchUrl(url, 5);
           } catch(e) { res.writeHead(400); res.end('{"error":"invalid json"}'); }
+        });
+        return;
+      }
+      // 执行 JavaScript 代码（在项目目录下用 node -e 运行，可指定文件让代码处理）
+      if (req.method === 'POST' && req.url === '/run-js') {
+        readBody(req).then(body => {
+          try {
+            const { code, file } = JSON.parse(body);
+            if (!code) { res.writeHead(400); res.end(JSON.stringify({ error: 'empty code' })); return; }
+            let fullCode = code;
+            if (file) {
+              const resolved = safePath(file);
+              if (!resolved) { res.writeHead(403); res.end(JSON.stringify({ error: 'path not allowed' })); return; }
+              fullCode = `const __file=${JSON.stringify(resolved)};\nconst __content=require('fs').readFileSync(__file,'utf-8');\n` + code;
+            }
+            execFile('node', ['-e', fullCode], { cwd: WORKSPACE, timeout: 60000, maxBuffer: 5*1024*1024 }, (err, stdout, stderr) => {
+              const output = (stdout||'') + (stderr||'');
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ code: err ? (err.code||1) : 0, output, error: err ? err.message : '' }));
+            });
+          } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid json' })); }
         });
         return;
       }
@@ -885,38 +1232,46 @@ function startServer() {
       }
       // 项目文件索引（仅当前目录一层，不递归子目录）
       if (req.method === 'GET' && req.url === '/project-index') {
-        const list=[];
-        let entries;
-        try{entries=fs.readdirSync(__dirname,{withFileTypes:true})}catch(e){res.writeHead(500);res.end('[]');return;}
-        for(const e of entries){
-          if(e.name.startsWith('.')||e.name==='node_modules'||e.name==='data')continue;
-          const rel=path.relative(__dirname,path.join(__dirname,e.name));
-          if(e.isDirectory()){
-            list.push({path:rel+'/',size:0,lines:0,isDir:true});
-          }else{
-            list.push({path:rel,size:fs.statSync(path.join(__dirname,e.name)).size,lines:fs.readFileSync(path.join(__dirname,e.name),'utf-8').split('\n').length});
-          }
-        }
-        res.writeHead(200,{'Content-Type':'application/json'});
-        res.end(JSON.stringify(list));
+        (async () => {
+          try {
+            const entries = await fs.promises.readdir(__dirname, { withFileTypes: true });
+            const list = [];
+            for (const e of entries) {
+              if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'data') continue;
+              const rel = path.relative(__dirname, path.join(__dirname, e.name));
+              if (e.isDirectory()) {
+                list.push({ path: rel + '/', size: 0, isDir: true });
+              } else {
+                const st = await fs.promises.stat(path.join(__dirname, e.name));
+                list.push({ path: rel, size: st.size, isDir: false });
+              }
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(list));
+          } catch (e) { res.writeHead(500); res.end('[]'); }
+        })();
         return;
       }
-      // 工作空间文件索引（扫描 WORKSPACE 目录下文件和目录，与 /project-index 区别是用 WORKSPACE 而非 __dirname）
+      // 工作空间文件索引（扫描 WORKSPACE 目录下文件）
       if (req.method === 'GET' && req.url === '/workspace-index') {
-        const list=[];
-        let entries;
-        try{entries=fs.readdirSync(WORKSPACE,{withFileTypes:true})}catch(e){res.writeHead(500);res.end('[]');return;}
-        for(const e of entries){
-          if(e.name.startsWith('.')||e.name==='node_modules'||e.name==='data')continue;
-          const rel=path.relative(WORKSPACE,path.join(WORKSPACE,e.name));
-          if(e.isDirectory()){
-            list.push({path:rel+'/',size:0,lines:0,isDir:true});
-          }else{
-            list.push({path:rel,size:fs.statSync(path.join(WORKSPACE,e.name)).size,lines:fs.readFileSync(path.join(WORKSPACE,e.name),'utf-8').split('\n').length});
-          }
-        }
-        res.writeHead(200,{'Content-Type':'application/json'});
-        res.end(JSON.stringify(list));
+        (async () => {
+          try {
+            const entries = await fs.promises.readdir(WORKSPACE, { withFileTypes: true });
+            const list = [];
+            for (const e of entries) {
+              if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'data') continue;
+              const rel = path.relative(WORKSPACE, path.join(WORKSPACE, e.name));
+              if (e.isDirectory()) {
+                list.push({ path: rel + '/', size: 0, isDir: true });
+              } else {
+                const st = await fs.promises.stat(path.join(WORKSPACE, e.name));
+                list.push({ path: rel, size: st.size, isDir: false });
+              }
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(list));
+          } catch (e) { res.writeHead(500); res.end('[]'); }
+        })();
         return;
       }
       // MCP 工具列表（按需连接）
@@ -1452,6 +1807,10 @@ app.whenReady().then(async () => {
       petCfgWindow = null;
       if(mainWindow&&!mainWindow.isDestroyed()) mainWindow.webContents.send('pet-cfg-window-closed');
     });
+  });
+  // 宠物配置开关（开场白/主动问候）即时生效：仅转发给主窗口，由主窗口实时更新内存中的 petCfg
+  ipcMain.on('update-pet-cfg-live', (_, partial) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pet-cfg-live', partial);
   });
   // 隐藏/显示宠物：隐藏时推到窗口最底层，显示时置顶
   ipcMain.on('toggle-pin', () => {
