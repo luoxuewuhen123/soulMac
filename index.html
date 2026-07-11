@@ -648,9 +648,6 @@ async function callAI(messages, signal, tools, enableThinking) {
   console.log(JSON.stringify(body, null, 2));
   console.log('---------------------------');
   body.stream=true;
-  console.log('----- 发给AI的完整请求 -----');
-  console.log(JSON.stringify(body, null, 2));
-  console.log('---------------------------');
   const res=await fetch(url,{method:'POST',signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+aiCfg.apiKey},body:JSON.stringify(body)});
   if(!res.ok){console.error('AI调用失败:',res.status,await res.text());return null;}
   // 流式读取 SSE 响应
