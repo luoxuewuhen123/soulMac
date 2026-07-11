@@ -10,3 +10,4 @@ AI 模型配置	.ai-cfg.json
 内置工具         .tools.json
 自定义指令      .instructions.json
 工作空间         .workspace.json
+上一步的工作记忆  .work-memory.json

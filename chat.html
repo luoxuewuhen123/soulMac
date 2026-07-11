@@ -50,7 +50,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f9f9fb;font:13px/1.
 <div id="inp-wrap"><textarea id="chat-input" placeholder="" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"></textarea><button id="send-btn" onclick="sendMsg()">发送</button></div>
 
 <script>
-const PAGE_SIZE=50;
+const PAGE_SIZE=100;
 let chatCfg={msgs:[]};
 let aiCfg={};
 let pendingReply=null;
@@ -59,6 +59,16 @@ let archiveMsgs=null;
 let archiveLoaded=false;
 let archiveIndex=0;        // 已从 archiveMsgs 尾部加载的条数
 let displayStart=0;        // 当前显示的第一条在 chatCfg.msgs 中的索引
+let _loadingMore=false;    // 防止自动加载重复触发
+
+// 手动解析时间戳为可排序数字，兼容 YYYY/M/D HH:mm 无前导零格式
+function timeVal(t){
+  if(!t)return 0;
+  const m=t.match(/(\d{4})\/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{1,2})/);
+  if(m)return parseInt(m[1])*12*31*24*60 + parseInt(m[2])*31*24*60 + parseInt(m[3])*24*60 + parseInt(m[4])*60 + parseInt(m[5]);
+  const d=new Date(t).getTime();
+  return isNaN(d)?0:d;
+}
 
 
 
@@ -76,7 +86,8 @@ async function loadData(){
     if(r.ok){
       const data=await r.json();
       if(Array.isArray(data)&&data.length>0){
-        archiveMsgs=data;
+        // 按时间戳排序保底，避免存档数据顺序错乱导致显示颠倒
+        archiveMsgs=data.sort((a,b)=>timeVal(a.time)-timeVal(b.time));
         archiveIndex=0;
       }
     }
@@ -101,6 +112,8 @@ async function loadData(){
 
 function renderInitial(){
   const msgs=chatCfg.msgs||[];
+  // 按时间戳排序保底（旧→新）
+  msgs.sort((a,b)=>timeVal(a.time)-timeVal(b.time));
   if(msgs.length===0){addMsg('ai','你好呀~ 有什么想聊的吗？');displayStart=0;return;}
   displayStart=Math.max(0,msgs.length-PAGE_SIZE);
   for(let i=displayStart;i<msgs.length;i++){const m=msgs[i];addMsg(m.role,m.content,m.time);}
@@ -114,51 +127,59 @@ function updateLoadMore(){
   const hasMoreArchive=archiveMsgs&&!archiveLoaded;
   if(!hasMoreMsgs&&!hasMoreArchive){wrap.innerHTML='<span style="color:#999;font-size:11px">— 已加载全部历史消息 —</span>';return;}
   const msgsEl=$('msgs');
-  if(msgsEl.scrollTop<=20){wrap.innerHTML='<span class="lm-btn" onclick="loadMore()">↑ 加载更多历史消息</span>';}
-  else{wrap.innerHTML='';}
+  // 滚动条接近顶部时自动加载
+  if(msgsEl.scrollTop<=40&&!_loadingMore){
+    loadMore();
+  }
 }
 
-async function loadMore(){
-  const btn=$('load-more-wrap')?.querySelector('.lm-btn');
-  if(btn)btn.classList.add('loading');
+function loadMore(){
+  if(_loadingMore)return;
+  _loadingMore=true;
   const msgsEl=$('msgs');
-  const prevScrollTop=msgsEl.scrollTop;
   const prevScrollHeight=msgsEl.scrollHeight;
-  const firstMsg=msgsEl.querySelector('.msg');
-  // 先从当前聊天记录加载
+  const wrap=$('load-more-wrap');
+  // 按时间排序
+  if(chatCfg.msgs)chatCfg.msgs.sort((a,b)=>timeVal(a.time)-timeVal(b.time));
+  // 从 displayStart 往前扩大范围
+  let newStart=displayStart;
   if(displayStart>0){
-    const newStart=Math.max(0,displayStart-PAGE_SIZE);
-    for(let i=displayStart-1;i>=newStart;i--){
-      const m=(chatCfg.msgs||[])[i];if(!m)continue;
-      const div=document.createElement('div');
-      div.className='msg '+(m.role==='user'?'me':'ai');
-      div.textContent=m.content;
-      const t=document.createElement('span');t.className='time';t.textContent=m.time||'';
-      div.appendChild(t);
-      if(firstMsg)msgsEl.insertBefore(div,firstMsg);else msgsEl.appendChild(div);
-    }
-    displayStart=newStart;
-  }
-  // 当前聊天记录已显示完，加载存档
-  else if(archiveMsgs&&!archiveLoaded){
+    newStart=Math.max(0,displayStart-PAGE_SIZE);
+  }else if(archiveMsgs&&!archiveLoaded){
+    // chatCfg 已全部显示，从存档尾部取 50 条加入
     const end=archiveMsgs.length-archiveIndex;
     const start=Math.max(0,end-PAGE_SIZE);
-    const batch=archiveMsgs.slice(start,end);
-    archiveIndex+=batch.length;
+    archiveIndex+=archiveMsgs.slice(start,end).length;
     if(archiveIndex>=archiveMsgs.length)archiveLoaded=true;
-    for(let i=batch.length-1;i>=0;i--){
-      const m=batch[i];
-      const div=document.createElement('div');
-      div.className='msg '+(m.role==='user'?'me':'ai');
-      div.textContent=m.content;
-      const t=document.createElement('span');t.className='time';t.textContent=m.time||'';
-      div.appendChild(t);
-      if(firstMsg)msgsEl.insertBefore(div,firstMsg);else msgsEl.appendChild(div);
-    }
   }
-  msgsEl.scrollTop=msgsEl.scrollHeight-prevScrollHeight+prevScrollTop;
+  displayStart=newStart;
+  // 收集所有要显示的消息（存档已加载部分 + chatCfg），按时间升序
+  const allMsgs=[];
+  if(archiveMsgs&&archiveIndex>0){
+    const loaded=archiveMsgs.slice(archiveMsgs.length-Math.min(archiveIndex,archiveMsgs.length));
+    allMsgs.push(...loaded);
+  }
+  if(chatCfg.msgs){
+    for(let i=displayStart;i<chatCfg.msgs.length;i++)allMsgs.push(chatCfg.msgs[i]);
+  }
+  // 合并后按时间排序保底
+  allMsgs.sort((a,b)=>timeVal(a.time)-timeVal(b.time));
+  // 重建 DOM
+  msgsEl.innerHTML='';
+  if(wrap)msgsEl.appendChild(wrap);
+  for(const m of allMsgs){
+    const div=document.createElement('div');
+    div.className='msg '+(m.role==='user'?'me':'ai');
+    div.textContent=m.content;
+    const t=document.createElement('span');t.className='time';t.textContent=m.time||'';
+    div.appendChild(t);
+    msgsEl.appendChild(div);
+  }
+  // 保持滚动位置在新增内容的底部
+  msgsEl.scrollTop=msgsEl.scrollHeight-prevScrollHeight;
+  if(msgsEl.scrollTop<0)msgsEl.scrollTop=0;
+  _loadingMore=false;
   updateLoadMore();
-  if(btn)btn.classList.remove('loading');
 }
 
 function getTime(){ return window.api?.getTime ? window.api.getTime() : (()=>{const d=new Date();return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');})(); }

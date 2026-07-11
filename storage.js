@@ -24,6 +24,7 @@ const files = {
   instructions:  '.instructions.json',
   'pet-cfg':     '.pet-cfg.json',
   workspace:     '.workspace.json',
+  'work-memory': '.work-memory.json',
 };
 
 // ===== 各文件默认值（文件不存在时返回） =====

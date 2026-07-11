@@ -97,7 +97,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/your/soul.git
+git clone https://github.com/luoxuewuhen123/soul.git
 cd soul
 
 # 2. 安装依赖

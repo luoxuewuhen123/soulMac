@@ -1,4 +1,6 @@
 const { app, BrowserWindow, ipcMain, Menu, screen, dialog } = require('electron');
+// 禁用安全策略警告（本地桌面宠物应用，非 Web 环境）
+process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 
 // 单实例锁：禁止重复启动
 const gotLock = app.requestSingleInstanceLock();
@@ -55,7 +57,7 @@ function readBody(req) {
 function ok(res) { res.writeHead(200); res.end('ok'); }
 
 // ===== 数据读写路由（从 handler 映射表自动生成） =====
-const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','experiences','skills','instructions','pet-cfg','workspace'];
+const DATA_NAMES = ['deco','chat-cfg','chat-archive','voice','ai-cfg','experiences','skills','instructions','pet-cfg','workspace','work-memory'];
 const dataHandlers = {};
 DATA_NAMES.forEach(n => {
   dataHandlers['POST /save-'+n] = (req, res) => readBody(req).then(b => storage.save(n, b, () => ok(res)));
@@ -188,7 +190,7 @@ function startServer() {
       if (req.method === 'GET' && req.url.startsWith('/read-file?path=')) {
         const q = new URL(req.url, 'http://x').searchParams;
         let fp = q.get('path') || '';
-        const maxLines = parseInt(q.get('lines') || '500', 10);
+        const maxLines = parseInt(q.get('lines') || '2000', 10);
         const offset = parseInt(q.get('offset') || '0', 10);
         if (!fp) { res.writeHead(400); res.end('{"error":"empty path"}'); return; }
         const resolved = safePath(fp);
@@ -1092,7 +1094,10 @@ function startServer() {
       }
       fs.readFile(fp, (e, d) => {
         if (e) { res.writeHead(404); res.end(); return; }
-        res.writeHead(200, { 'Content-Type': MIME_MAP[path.extname(fp)] || 'application/octet-stream' });
+        const ext = path.extname(fp);
+        const headers = { 'Content-Type': MIME_MAP[ext] || 'application/octet-stream' };
+        if (ext === '.html') headers['Content-Security-Policy'] = "default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https:; img-src 'self' data: https:; connect-src 'self' http: https:;";
+        res.writeHead(200, headers);
         res.end(d);
       });
     } catch(e) { console.error('[server] 异常:', e.message); try { res.writeHead(500); res.end(); } catch(ee) {} }

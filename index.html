@@ -131,6 +131,7 @@ async function autoGreet(){
     const ctx=await buildAiContext('greet');
     const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,experiencesMsg:ctx.experiencesMsg,instructionsMsg:ctx.instructionsMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
     if(!r.finalReply){scheduleProactive();return;}
+    tryGenerateWorkMemory(r.sessionMsgs, r.finalReply); // 异步生成工作记忆
     // 用户点击中断后丢弃回复，不保存不显示
     if(_chatAborted){scheduleProactive();return;}
     const rawReply=r.finalReply;
@@ -970,7 +971,9 @@ async function buildAiContext(scenario) {
   let instructionsMsg = null;
   // 自定义指令放在角色之后
   instructionsMsg = await injectInstructions(msgs);
-  // 摘要放在自定义指令之后
+  // 工作记忆放在自定义指令之后
+  if(chatCfg.workMemory)msgs.push({role:'system',content:'【上次工作记忆】\n'+chatCfg.workMemory});
+  // 摘要放在工作记忆之后
   if (Array.isArray(chatCfg.experiences) && chatCfg.experiences.length > 0) {
     experiencesMsg = { role: 'system', content: chatCfg.experiences.map(e => e.timeRange + '\n' + e.summary).join('\n\n') };
     msgs.push(experiencesMsg);
@@ -1010,7 +1013,7 @@ async function buildAiContext(scenario) {
       projectText += '\n' + lines.join('\n') + (idx.length > 1000 ? '\n  └── ...(仅显示前1000个)' : '');
     }
   } catch (e) {}
-  const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先思考要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先思考出完整的计划，将计划拆解成步骤，再执行，只能在工作空间内执行任务，能一次性完成的不要分多次，读取文件只读需要的部分，优先使用专用工具而非 shell 命令(当前系统是 ' + (osText || 'Windows') + ')，执行完成后检查结果是否符合预期，不符合再调整。\n• 修 bug 时如果连续尝试 3 次仍未解决，停止操作并将问题告诉主人，让主人提供报错信息来协助定位。' + projectText };
+  const thinkGuideMsg = { role: 'system', content: '【思考指引】\n• 先思考要聊天还是要执行任务？\n• 聊天的话记得在内容最后面加上对应的情绪标签，例如[情绪:开心]，情绪可选：开心、生气、悲伤、疑问、惊讶、害羞\n• 执行任务的话先明确做什么然后思考出计划然后根据计划制定步骤，制定的步骤不能有冗余的操作，能在一个步骤完成的不要分多步。\n所有的任务都要在工作空间内进行，文件操作优先使用专用工具而非 shell 命令(当前系统是 ' + (osText || 'Windows') + ')\n• 修 bug 时如果连续尝试 3 次仍未解决，停止操作并将问题告诉主人，让主人提供报错信息来协助定位。' + projectText };
   msgs.push(thinkGuideMsg);
   await ensureToolsCfg();
   const tools = makeTools();
@@ -1054,7 +1057,7 @@ async function truncateMsgs(){
     const aiMsgs=[
       {role:'system',content:getRole()},
       {role:'system',content:dropped.map(x=>'【'+x.time+'】'+(x.role==='user'?'主人':'宠物')+'：'+x.content).join('\n')},
-      {role:'system',content:'作为主人的灵魂伴侣，为了能在有限的记忆中更好的理解主人，你需要将与主人的所有聊天内容以你的口吻讲述成你的经历。'},
+      {role:'system',content:'作为主人的灵魂伴侣，为了能在有限的记忆中更好的理解主人，你需要将与主人的所有聊天内容以你的口吻讲述成你的经历，不输出开场白和解释。'},
     ];
     const ac2=new AbortController();const t2=setTimeout(()=>ac2.abort(),120000);
     const d=await callAI(aiMsgs,ac2.signal);
@@ -1088,12 +1091,13 @@ async function truncateMsgs(){
 let chatCfg={msgs:[]};
 // 统一加载所有配置（消除分散加载导致的不一致）
 async function loadAllConfigs(){
-  const [chat, exp, ai, voice, pet]=await Promise.all([
+  const [chat, exp, ai, voice, pet, wm]=await Promise.all([
     store.load('chat-cfg'),
     store.load('experiences'),
     store.load('ai-cfg'),
     store.load('voice'),
     store.load('pet-cfg'),
+    store.load('work-memory'),
   ]);
   petCfg=pet||{};
   chatCfg=chat||{msgs:[]};
@@ -1113,6 +1117,8 @@ async function loadAllConfigs(){
   if(aiCfg.vision===undefined)aiCfg.vision=modelSupportsVision(aiCfg.model);
   if(aiCfg.thinking===undefined)aiCfg.thinking=modelSupportsThinking(aiCfg.model);
   // 上下文窗口值：0 和 undefined 都会触发 fallback
+  // 加载工作记忆
+  chatCfg.workMemory=wm&&wm.content?wm.content:null;
   // 加载语音配置
   if(voice)voiceEnabled=voice.enabled===true;
 }
@@ -1223,8 +1229,39 @@ async function handleChatMsg(userText){
     await saveChatCfg();
     bubble(cleanText,false,rawReply,true);
     scheduleProactive();
+    // 有工具调用记录时，异步生成工作记忆（不阻塞回复显示）
+    tryGenerateWorkMemory(sessionMsgs, finalReply);
   }catch(e){if(e.name!=='AbortError'){console.error('chat AI error:',e.message,e.stack);window.api?.sendToChatWindow({type:'chat-reply',text:'AI调用失败: '+e.message});}scheduleProactive();}
   finally{_abortChatFn=null;unsub?.();window.api?.aiDone();}
+}
+// ===== 工作记忆生成（三场景共用） =====
+async function tryGenerateWorkMemory(sessionMsgs, finalReply){
+  if(!(sessionMsgs&&sessionMsgs.length>0))return;
+  try{
+    let toolLog='';let round=0;
+    for(const sm of sessionMsgs){
+      if(sm.role==='assistant'&&sm.tool_calls){
+        for(const tc of sm.tool_calls){round++;const fn=tc.function.name;let args='';try{args=JSON.stringify(JSON.parse(tc.function.arguments),null,2);}catch(e){args=tc.function.arguments;}toolLog+=`第${round}步：调用工具【${fn}】\n参数：\n${args}\n`;}
+      }else if(sm.role==='tool'){
+        const result=(sm.content||'').length>2000?sm.content.substring(0,2000)+'\n...(结果过长已截断)':(sm.content||'');
+        toolLog+=`执行结果：\n${result}\n\n`;
+      }
+    }
+    const workMsgs=[
+      {role:'system',content:getRole()},
+      {role:'user',content:'以下是刚才你与主人的对话中，你的思考过程、调用的工具和执行结果。请按照下面的要求总结工作记忆。'},
+      {role:'system',content:'【本次工具调用记录】\n'+toolLog+'\n【最终回复】\n'+(finalReply||'')},
+      {role:'system',content:'请总结工作记忆，注意精简，只记录决策和关键信息，不要逐条罗列工具调用细节。只输出以下格式，不要输出其他文字：\n\n【任务】本次要完成的目标\n【计划】制定的计划\n【步骤】\n1. 做了什么、为什么这么做、关键发现\n2. ...\n【最终结果】任务完成情况'},
+    ];
+    const wAc=new AbortController();const wT=setTimeout(()=>wAc.abort(),30000);
+    const d=await callAI(workMsgs,wAc.signal,null,true);
+    clearTimeout(wT);
+    if(d&&d.choices&&d.choices[0]&&d.choices[0].message&&d.choices[0].message.content){
+      const wmContent=d.choices[0].message.content.trim();
+      await store.save('work-memory',{time:getTime(),content:wmContent});
+      chatCfg.workMemory=wmContent;
+    }
+  }catch(e){if(e.name!=='AbortError')console.warn('[work-memory]',e.message);}
 }
 window.api?.onFromChatWindow(data=>{
   if(data.type==='user-msg'){
@@ -1266,6 +1303,7 @@ async function generateGreeting(){
     const ctx=await buildAiContext('startup');
     const r=await runChatFullLoop(ctx.msgs,ctx.tools,{systemRoleMsg:ctx.systemRoleMsg,experiencesMsg:ctx.experiencesMsg,instructionsMsg:ctx.instructionsMsg,instructionMsgs:ctx.instructionMsgs}, ac.signal);
     if(!r.finalReply)return null;
+    tryGenerateWorkMemory(r.sessionMsgs, r.finalReply); // 异步生成工作记忆
     // 用户点击中断后丢弃回复
     if(_chatAborted)return null;
     const raw=r.finalReply;
