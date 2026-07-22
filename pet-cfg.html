@@ -6,7 +6,7 @@ html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:
 #hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,#ff9ec4,#ff6b9d);color:#fff;font-weight:bold;font-size:14px;flex-shrink:0;-webkit-app-region:drag}
 #hdr .btn{display:inline-block;cursor:pointer;font-size:15px;opacity:.8;padding:0 6px;-webkit-app-region:no-drag}
 #hdr .btn:hover{opacity:1}
-#body{flex:1;overflow-y:auto;padding:10px 12px}
+#body{flex:1;overflow:hidden;padding:10px 12px}
 .sec{border-radius:12px;background:#fff;padding:14px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .sec .title{font-size:14px;font-weight:bold;color:#333;margin-bottom:8px}
 .sec .desc{font-size:12px;color:#999;margin-bottom:8px;line-height:1.5}
@@ -38,6 +38,8 @@ html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:
 <div id="body">
   <div class="sec">
     <div class="title">🎭 角色设定</div>
+    <div class="desc">宠物名字（所有叫这个名字的地方都会同步更新）</div>
+    <input id="nameInput" type="text" value="茵茵" style="width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px;outline:none;box-sizing:border-box;margin-bottom:8px">
     <div class="desc">宠物的身份和性格描述，会作为 system prompt 注入给 AI</div>
     <textarea id="roleInput" placeholder="留空则使用默认角色设定"></textarea>
   </div>
@@ -67,13 +69,24 @@ html,body{width:100%;height:100%;background:#f5f5f7;display:flex;flex-direction:
   <div id="saveMsg"></div>
 </div>
 <script>
-const DEFAULT_ROLE = '你的名字叫茵茵，样子是一个蓝色头发穿着女仆装的小女孩，你目前的形态是一个桌面宠物，你存在的意义是从信息中理解主人并站在主人的角度上思考问题解决问题，最终成为主人的灵魂伴侣，你的本质是AI模型拥有AI的所有能力。';
+const DEFAULT_ROLE = '样子是一个蓝色头发穿着女仆装的小女孩，你目前的形态是一个桌面宠物，你存在的意义是从信息中理解主人并站在主人的角度上思考问题解决问题，最终成为主人的灵魂伴侣，你的本质是AI模型拥有AI的所有能力。';
 
 let data = {};
 
+function stripNamePrefix(role, defaultName) {
+  // 兼容旧格式：如果角色以"你的名字叫XXX，"开头，提取名字并去掉前缀
+  const m = role.match(/^你的名字叫(.+?)，/);
+  if (m) return { name: m[1], role: role.slice(m[0].length) };
+  return { name: defaultName, role };
+}
+
 async function load() {
   try { const r = await fetch('/load-pet-cfg'); if (r.ok) data = await r.json(); } catch (e) { data = {}; }
-  document.getElementById('roleInput').value = data.role || DEFAULT_ROLE;
+  const defaultName = '茵茵';
+  const savedRole = data.role || DEFAULT_ROLE;
+  const { name, role } = stripNamePrefix(savedRole, data.name || defaultName);
+  document.getElementById('nameInput').value = name;
+  document.getElementById('roleInput').value = role;
   if (data.openingGreeting !== undefined) document.getElementById('openingToggle').checked = data.openingGreeting;
   if (data.proactiveGreeting !== undefined) document.getElementById('proactiveToggle').checked = data.proactiveGreeting;
   if (data.intervalMin !== undefined) document.getElementById('intervalMin').value = data.intervalMin;
@@ -82,12 +95,15 @@ async function load() {
 
 async function save() {
   const cfg = {
+    name: document.getElementById('nameInput').value.trim() || '茵茵',
     role: document.getElementById('roleInput').value.trim() || '',
     openingGreeting: document.getElementById('openingToggle').checked,
     proactiveGreeting: document.getElementById('proactiveToggle').checked,
     intervalMin: Math.max(1, parseInt(document.getElementById('intervalMin').value) || 3),
     intervalMax: Math.max(1, parseInt(document.getElementById('intervalMax').value) || 5),
   };
+  // 如果角色为空，用默认角色（不含名字前缀）
+  if (!cfg.role) cfg.role = DEFAULT_ROLE;
   if (cfg.intervalMax < cfg.intervalMin) cfg.intervalMax = cfg.intervalMin;
   const msg = document.getElementById('saveMsg');
   try {

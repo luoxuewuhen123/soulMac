@@ -294,6 +294,7 @@ document.getElementById('customBtn').addEventListener('click',()=>toggleCustom(t
 function toggleIntro(){const i=document.getElementById('intro'),d=document.getElementById('introDetail');if(d.classList.contains('open')){d.style.maxHeight='0px';i.classList.remove('open');d.classList.remove('open');}else{i.classList.add('open');d.classList.add('open');d.style.maxHeight=d.scrollHeight+'px';}}
 function clearSearch(){const box=document.getElementById('searchResults');box.hidden=true;box.innerHTML='';}
 loadSkills();
+(async function initName(){try{const r=await fetch('/load-pet-cfg');if(r.ok){const p=await r.json();document.title=(p.name||'茵茵')+'拓展工具';}}catch(e){}})();
 </script>
 </body>
 </html>

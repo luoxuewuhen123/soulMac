@@ -59,6 +59,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f9f9fb;font:13px/1.
 const PAGE_SIZE=100;
 let chatCfg={msgs:[]};
 let aiCfg={};
+let petName='茵茵';
 let pendingReply=null;
 let _cancelLatch=false; // 中断后防显示回复
 let archiveMsgs=null;
@@ -80,6 +81,9 @@ function timeVal(t){
 
 
 async function loadData(){
+  try{const r=await fetch('/load-pet-cfg');if(r.ok){const pet=await r.json();if(pet.name)petName=pet.name;}}catch(e){}
+  document.title = '与' + petName + '聊天';
+  document.querySelector('#hdr span:nth-child(2)').textContent = '💬 与' + petName + '聊天';
   try{const r=await fetch('/load-chat-cfg');if(r.ok)chatCfg=await r.json();}catch(e){}
   try{const r=await fetch('/load-ai-cfg');if(r.ok)aiCfg=await r.json();}catch(e){}
   if(!aiCfg.url)aiCfg.url='https://api.deepseek.com/v1';if(!aiCfg.model)aiCfg.model='deepseek-v4-flash';
@@ -283,6 +287,7 @@ function _resolvePending(text){
   pendingReply=null;
 }
 window.api?.onFromPetWindow(data=>{
+  if(data.type==='tool-status'&&data.id&&data.id.startsWith('reads'))console.log('[chat] received readSt',JSON.stringify({id:data.id,readsLen:data.reads?.length,ok:data.ok,text:data.text}).slice(0,300));
   if(data.type==='chat-reply'||data.type==='show-reply'){
     _resolvePending(data.text);
   }
@@ -291,7 +296,7 @@ window.api?.onFromPetWindow(data=>{
     let div=null;
     if(data.id){div=$('msgs').querySelector('[data-tid="'+data.id+'"]');}
     // 若该行已是汇总结果（读取/编辑），后续无汇总数据的状态（如"正在…"）不应覆盖它
-    if(div && (div.classList.contains('ok')||div.classList.contains('err')) && !data.reads && !data.edits) return;
+    if(div && (div.classList.contains('ok')||div.classList.contains('err')) && !data.reads?.length && !data.edits?.length) return;
     if(!div){
       div=document.createElement('div');
       div.className='msg tool';
@@ -357,7 +362,7 @@ window.api?.onFromPetWindow(data=>{
     div.className='msg thinking';
     const details=document.createElement('details');
     const summary=document.createElement('summary');
-    summary.textContent='💭 茵茵的思考过程（点击展开）';
+    summary.textContent='💭 ' + petName + '的思考过程（点击展开）';
     const body=document.createElement('div');
     body.className='think-body';
     body.textContent=data.text;

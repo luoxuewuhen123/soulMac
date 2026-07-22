@@ -92,6 +92,7 @@ async function removeWorkspace(path){
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 function escJs(s){ return String(s).replace(/'/g, "\\'"); }
 load();
+(async function initName(){try{const r=await fetch('/load-pet-cfg');if(r.ok){const p=await r.json();document.title=(p.name||'茵茵')+'工作空间';}}catch(e){}})();
 </script>
 </body>
 </html>

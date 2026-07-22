@@ -6,7 +6,7 @@ html,body{width:100%;height:100%;background:#f5f5f5;display:flex;flex-direction:
 #hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,#ff9ec4,#ff6b9d);color:#fff;font-weight:bold;font-size:14px;flex-shrink:0;-webkit-app-region:drag}
 #hdr .btn{display:inline-block;cursor:pointer;font-size:15px;opacity:.8;padding:0 6px;-webkit-app-region:no-drag}
 #hdr .btn:hover{opacity:1}
-.box{flex:1;background:#fff;padding:20px;display:flex;flex-direction:column;overflow-y:auto}
+.box{flex:1;background:#fff;padding:10px 16px 8px;display:flex;flex-direction:column;overflow-y:auto}
 label{display:block;margin:8px 0 4px;color:#666;font-size:12px}
 input,select{width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:8px;outline:none;font-size:13px;background:#fff;font-family:inherit}
 input:focus,select:focus{border-color:#ff6b9d}
@@ -14,13 +14,11 @@ input:focus,select:focus{border-color:#ff6b9d}
 .pwd-wrap input{padding-right:36px}
 .pwd-toggle{position:absolute;right:8px;cursor:pointer;font-size:16px;opacity:.5;user-select:none;line-height:1;padding:0 2px}
 .pwd-toggle:hover{opacity:1}
-.btns{display:flex;gap:8px;margin-top:14px}
-.btns button{flex:1;border:none;border-radius:8px;padding:7px;cursor:pointer;font-size:13px}
-.btns .save{background:#ff6b9d;color:#fff}
-.btns .save:hover{background:#ff528a}
-.btns .cancel{background:#f0f0f0;color:#666}
-.btns .cancel:hover{background:#e0e0e0}
-#msg{color:#e74c3c;font-size:12px;text-align:center;margin-top:10px;min-height:18px}
+.btns{margin-top:10px}
+.btns button{width:100%;border:none;border-radius:8px;padding:7px;cursor:pointer;font-size:13px;background:#ff6b9d;color:#fff}
+.btns button:hover{background:#ff528a}
+#msg{color:#e74c3c;font-size:12px;text-align:center;min-height:0;line-height:0}
+#msg:not(:empty){margin-top:8px;min-height:18px;line-height:1.5}
 </style></head>
 <body>
 <div id="hdr"><span><span class="btn" onclick="window.api?.minimizeWindow()">─</span></span><span>⚙️ 配置AI模型</span><span><span class="btn" onclick="window.close()">✕</span></span></div>
@@ -41,22 +39,8 @@ input:focus,select:focus{border-color:#ff6b9d}
   </optgroup>
 </select>
 <input id="cfg-custom-model" placeholder="输入自定义模型名" style="display:none;margin-top:6px"/>
-<label>上下文窗口大小（tokens）</label>
-<input id="cfg-context-window" type="number" placeholder="比如 65536, 128000, 1000000" style="font-size:12px"/>
-<div id="vision-row" style="display:none">
-  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#333;font-size:13px;margin-top:12px">
-    <input id="cfg-vision" type="checkbox" style="width:auto"/> 模型支持图片识别（视觉多模态）
-  </label>
-  <div style="font-size:11px;color:#999;margin-top:2px">勾选后茵茵才能"看"图片。</div>
-</div>
-<div id="thinking-row" style="display:none">
-  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#333;font-size:13px;margin-top:12px">
-    <input id="cfg-thinking" type="checkbox" style="width:auto"/> 开启深度思考模式（推理）
-  </label>
-  <div style="font-size:11px;color:#999;margin-top:2px">开启后茵茵回答前会先做推理，思考过程会折叠展示。</div>
-</div>
 <div id="msg"></div>
-<div class="btns"><button class="save" onclick="saveCfg()">保存</button><button class="cancel" onclick="window.close()">取消</button></div>
+<div class="btns"><button class="save" onclick="saveCfg()">保存</button></div>
 </div>
 <script>
 const MODEL_URLS={
@@ -73,68 +57,16 @@ const MODEL_URLS={
   // 文心（百度千帆，OpenAI 兼容）
   'ernie-5.0':'https://qianfan.baidubce.com/v2',
 };
-const MODEL_CONTEXTS={
-  // DeepSeek V4 Flash：原生 1M 上下文、思考/非思考双模
-  'deepseek-v4-flash':1000000,
-  // 通义千问 Qwen3-Max：256K 上下文
-  'qwen-max':256000,
-  // 智谱 GLM-5.2：1M 上下文（纯文本，不支持视觉）
-  'glm-5.2':1000000,
-  // Kimi K2.5：256K 上下文
-  'kimi-k2':256000,
-  // 豆包 Seed-2.0 Pro：256K 上下文、图文视频多模态
-  'doubao-seed-2.0-pro':256000,
-  // 文心 ERNIE 5.0：128K 上下文、原生全模态
-  'ernie-5.0':128000,
-};
-function modelSupportsVision(model){
-  const m=(model||'').toLowerCase();
-  // 2026 国产多模态支持（DeepSeek V4 当前 API 仅接受文本、GLM 为纯文本，均不支持视觉）
-  if(/^(qwen|kimi|doubao|ernie)/.test(m))return true;
-  if(/vl|vision|多模态/.test(m))return true;
-  return false;
-}
-function modelSupportsThinking(model){
-  const m=(model||'').toLowerCase();
-  // 2026 国产主流大模型均支持深度思考/推理模式
-  if(/^(deepseek|qwen|glm|kimi|doubao|ernie)/.test(m))return true;
-  if(/reason|think|reasoner|r1|-t1|o1|o3/.test(m))return true;
-  return false;
-}
-// 根据模型能力显示/隐藏对应选项（仅支持时才出现，避免用户误勾不支持的能力）
-function applyCapabilityVisibility(model, isCustom){
-  if(isCustom){
-    // 自定义模型：显示全部选项，让用户自行判断（按名称猜测给个默认勾选提示）
-    $('vision-row').style.display='block';
-    $('thinking-row').style.display='block';
-    $('cfg-vision').checked=modelSupportsVision(model);
-    $('cfg-thinking').checked=modelSupportsThinking(model);
-  }else{
-    // 已知模型：仅当能力支持时才显示该选项，并按检测自动勾选
-    const v=modelSupportsVision(model), t=modelSupportsThinking(model);
-    $('vision-row').style.display=v?'block':'none';
-    $('thinking-row').style.display=t?'block':'none';
-    $('cfg-vision').checked=v;
-    $('cfg-thinking').checked=t;
-  }
-}
 function onModelChange(){
   const sel=$('cfg-model');
   const customInput=$('cfg-custom-model');
-  const ctxInput=$('cfg-context-window');
   if(sel.value==='__custom__'){
     customInput.style.display='block';
     customInput.focus();
-    // 自定义模型时不覆盖用户已填的上下文值；显示全部能力选项让用户自行判断
-    applyCapabilityVisibility(customInput.value.trim(), true);
   }else{
     customInput.style.display='none';
     const url=MODEL_URLS[sel.value];
     if(url)$('cfg-url').value=url;
-    const ctx=MODEL_CONTEXTS[sel.value];
-    if(ctx)ctxInput.value=ctx;
-    // 切换已知模型时自动检测能力：仅支持的选项才显示，并按检测自动勾选
-    applyCapabilityVisibility(sel.value, false);
   }
 }
 async function loadCfg(){
@@ -148,29 +80,15 @@ async function loadCfg(){
       $('cfg-key').value=d.apiKey||'';
       const model=d.model||'deepseek-v4-flash';
       const knownModels=Object.keys(MODEL_URLS);
-      const isCustom=!knownModels.includes(model);
-      if(!isCustom){
-        $('cfg-model').value=model;
-        // 自动填充已知模型的上下文值
-        if(MODEL_CONTEXTS[model])$('cfg-context-window').value=MODEL_CONTEXTS[model];
-      }else{
+      if(!knownModels.includes(model)){
         $('cfg-model').value='__custom__';
         $('cfg-custom-model').value=model;
         $('cfg-custom-model').style.display='block';
+      }else{
+        $('cfg-model').value=model;
       }
-      // 从配置加载（如果保存过，覆盖自动值）
-      if(d.contextWindow)$('cfg-context-window').value=d.contextWindow;
-      // 视觉能力：以已保存的为准，否则按模型自动判断
-      const v=(d.vision!==undefined)?!!d.vision:modelSupportsVision(model);
-      // 思考能力：以已保存的为准，否则按模型自动判断
-      const t=(d.thinking!==undefined)?!!d.thinking:modelSupportsThinking(model);
-      // 自定义模型显示全部选项（供用户自行判断）；已知模型仅显示支持的能力项
-      applyCapabilityVisibility(model, isCustom);
-      // 已保存的值优先；但被隐藏（不支持）的项保持关闭，避免携带过期开启值
-      if($('vision-row').style.display!=='none')$('cfg-vision').checked=v;
-      if($('thinking-row').style.display!=='none')$('cfg-thinking').checked=t;
     }
-  }catch(e){/* 超时或加载失败，保持默认值 */}
+  }catch(e){}
 }
 async function saveCfg(){
   const url=$('cfg-url').value.trim();
@@ -178,11 +96,7 @@ async function saveCfg(){
   let model=$('cfg-model').value.trim();
   if(model==='__custom__')model=$('cfg-custom-model').value.trim();
   if(!model)model=$('cfg-model').value.trim();
-  const ctx=$('cfg-context-window').value.trim();
-  const vision=$('cfg-vision').checked;
-  const thinking=$('cfg-thinking').checked;
-  const cfg={url,apiKey:key,model,vision,thinking};
-  if(ctx)cfg.contextWindow=parseInt(ctx,10);
+  const cfg={url,apiKey:key,model};
   try{
     await fetch('/save-ai-cfg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
     $('msg').textContent='✅ 配置已保存';
@@ -199,6 +113,7 @@ function toggleKey(){
 }
 function $(id){return document.getElementById(id)}
 loadCfg();
+(async function initName(){try{const r=await fetch('/load-pet-cfg');if(r.ok){const p=await r.json();const n=p.name||'茵茵';document.title=n+'配置';}}catch(e){}})();
 </script>
 </body>
 </html>

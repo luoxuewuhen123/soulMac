@@ -181,5 +181,6 @@ async function save(){
 function toggleIntro(){const i=document.getElementById('intro'),d=document.getElementById('introDetail');if(d.classList.contains('open')){d.style.maxHeight='0px';i.classList.remove('open');d.classList.remove('open');}else{i.classList.add('open');d.classList.add('open');d.style.maxHeight=d.scrollHeight+'px';}}
 
 load();
+(async function initName(){try{const r=await fetch('/load-pet-cfg');if(r.ok){const p=await r.json();document.title=(p.name||'茵茵')+'自定义指令';}}catch(e){}})();
 </script>
 </body></html>

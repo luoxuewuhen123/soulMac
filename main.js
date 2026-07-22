@@ -858,18 +858,9 @@ function startServer() {
               if (changes.length === 0 && skipped.length === 0) { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({count:0})); return; }
               fs.writeFile(resolved, modified, 'utf-8', (we) => {
                 if (we) { res.writeHead(500); res.end(JSON.stringify({error:'写入失败: ' + we.message})); return; }
-                // 仅代码文件执行语法检查
-                const codeExts=['.js','.jsx','.mjs','.cjs','.ts','.tsx','.mts','.cts','.vue','.py','.html','.css','.xml','.yaml','.yml','.sh','.bash'];
-                const ext=path.extname(resolved).toLowerCase();
-                if(codeExts.includes(ext)){
-                  lintFile(resolved, (e, lint) => {
-                    res.writeHead(200, {'Content-Type':'application/json'});
-                    res.end(JSON.stringify({count:changes.length, changes, skipped, lint}));
-                  });
-                }else{
-                  res.writeHead(200, {'Content-Type':'application/json'});
-                  res.end(JSON.stringify({count:changes.length, changes, skipped}));
-                }
+                // 写入后不再自动执行 lint_file
+                res.writeHead(200, {'Content-Type':'application/json'});
+                res.end(JSON.stringify({count:changes.length, changes, skipped}));
               });
             });
           } catch(e) { res.writeHead(400); res.end(JSON.stringify({error:'invalid json'})); }
@@ -877,7 +868,7 @@ function startServer() {
         return;
       }
 
-      // 创建文件（覆盖写入，若文件已存在则计算行级差异；.docx/.pdf 自动排版；写入后自动 lint）
+      // 创建文件（覆盖写入，若文件已存在则计算行级差异；.docx/.pdf 自动排版；写入后不再自动 lint）
       if (req.method === 'POST' && req.url === '/create-file') {
         readBody(req).then(body => {
           try {
@@ -890,13 +881,8 @@ function startServer() {
             try { fs.mkdirSync(path.dirname(resolved), { recursive: true }); } catch (e) {}
             fs.writeFile(resolved, content, 'utf-8', (we) => {
               if (we) { res.writeHead(500); res.end('{"error":"创建失败: ' + we.message.replace(/"/g,"'") + '"}'); return; }
-              // 仅代码文件执行语法检查，非代码文件（json/txt/md等）跳过
-              const codeExts=['.js','.jsx','.mjs','.cjs','.ts','.tsx','.mts','.cts','.vue','.py','.html','.css','.xml','.yaml','.yml','.sh','.bash'];
-              if(codeExts.includes(ext)){
-                lintFile(resolved, (e, lint) => ok({ success: true, lint }));
-              }else{
-                ok({ success: true });
-              }
+              // 写入后不再自动执行 lint_file
+              ok({ success: true });
             });
           } catch(e) { res.writeHead(400); res.end('{"error":"invalid json"}'); }
         });
@@ -920,7 +906,7 @@ function startServer() {
         });
         return;
       }
-      // 跨文件批量替换：搜索所有匹配文件 → 替换全部匹配 → 自动语法检查
+      // 跨文件批量替换：搜索所有匹配文件 → 替换全部匹配（写入后不再自动 lint）
       if (req.method === 'POST' && req.url === '/batch-replace') {
         readBody(req).then(body => {
           try {
@@ -953,8 +939,7 @@ function startServer() {
                     const matchLines = [];
                     for (let i = 0; i < lines.length; i++) { re.lastIndex = 0; if (re.test(lines[i])) matchLines.push(i + 1); }
                     await fs.promises.writeFile(fp, newContent, 'utf-8');
-                    const lint = await new Promise(resolve => lintFile(fp, (e, r) => resolve(r)));
-                    results.push({ file: relPath, matchLines, lint: lint || null });
+                    results.push({ file: relPath, matchLines });
                   } catch(e) {
                     results.push({ file: path.relative(resolved, fp), error: e.message });
                   }
@@ -1009,7 +994,7 @@ function startServer() {
         });
         return;
       }
-      // 语法检查路由（lint 逻辑已移至模块顶层 lintFile；edit_file/replace 写入后自动调用，AI 无需单独 lint）
+      // 语法检查路由（lint 逻辑已移至模块顶层 lintFile；供手动 lint_file 调用）
       if (req.method === 'POST' && req.url === '/lint-file') {
         readBody(req).then(body => {
           try {
@@ -1655,7 +1640,7 @@ app.whenReady().then(async () => {
   ipcMain.on('open-ai-cfg-window', () => {
     if (aiCfgWindow && !aiCfgWindow.isDestroyed()) { if(aiCfgWindow.isMinimized())aiCfgWindow.restore(); aiCfgWindow.focus(); return; }
     aiCfgWindow = new BrowserWindow({
-      width: 360, height: 480, resizable: false,
+      width: 360, height: 320, resizable: false,
       transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
     });
@@ -1716,7 +1701,7 @@ app.whenReady().then(async () => {
   ipcMain.on('open-pet-cfg-window', () => {
     if (petCfgWindow && !petCfgWindow.isDestroyed()) { if(petCfgWindow.isMinimized())petCfgWindow.restore(); petCfgWindow.focus(); return; }
     petCfgWindow = new BrowserWindow({
-      width: 380, height: 640, resizable: false,
+      width: 380, height: 680, resizable: false,
       transparent: false, frame: false, skipTaskbar: false, alwaysOnTop: true,
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
     });
